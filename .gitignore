@@ -1,0 +1,20 @@
+# Rust
+**/target/
+**/*.rs.bk
+
+# Go
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# this project
+**/.idea
+**/.vscode
+**/.proxyai
+**/.junie
