@@ -6,13 +6,13 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 struct Cli {
-    /// 标准格式的 SCE-RS 项目路径（包含 ELF 文件）
+    /// 标准格式的 AXE RsFunc 编译产物路径（包含 ELF 文件）
     #[arg(short, long)]
-    path: PathBuf,
+    cwkdir: PathBuf,
 
     /// 项目名称
     #[arg(short, long)]
-    name: String,
+    fnname: String,
 
     /// 输入文件路径 (可选)
     #[arg(short, long)]
@@ -21,6 +21,10 @@ struct Cli {
     /// 证明模式: core, plonk, groth16, compressed
     #[arg(short, long, default_value = "core")]
     mode: String,
+
+    /// 工作目录（输出文件保存在这里）
+    #[arg(short, long)]
+    wkdir: PathBuf,
 }
 
 #[tokio::main]
@@ -28,19 +32,20 @@ async fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
 
-    run_prove(&cli.path, &cli.name, cli.input.as_ref(), &cli.mode).await?;
+    run_prove(&cli.cwkdir, &cli.fnname, cli.input.as_ref(), &cli.mode, &cli.wkdir).await?;
 
     Ok(())
 }
 
 async fn run_prove(
-    program_path: &PathBuf,
-    program_name: &String,
+    target_path: &PathBuf,
+    function_name: &String,
     input_path: Option<&PathBuf>,
     mode: &str,
+    wkdir: &PathBuf
 ) -> Result<()> {
     // 1. 读取 ELF 文件
-    let elf_bytes = fs::read(PathBuf::from(program_path).join("target").join("elf-compilation").join("riscv64im-succinct-zkvm-elf").join("release").join(program_name))?;
+    let elf_bytes = fs::read(PathBuf::from(target_path).join("elf-compilation").join("riscv64im-succinct-zkvm-elf").join("release").join(function_name))?;
 
     // 2. 准备输入数据 (stdin)
     let (stdin_exec, stdin_prove) = if let Some(path) = input_path {
@@ -58,7 +63,7 @@ async fn run_prove(
     let (public_values, exec_report) = client.execute(pk.elf().clone(), stdin_exec).await?;
 
     // 设置路径
-    let base:PathBuf = PathBuf::from(program_path).join("execution_out").join(program_name);
+    let base:PathBuf = PathBuf::from(wkdir).join("execution_out");
     let pv_out:PathBuf = base.join("pv.txt");
     let rp_out:PathBuf = base.join("report.json");
     let pf_out:PathBuf = base.join("proof.bin");

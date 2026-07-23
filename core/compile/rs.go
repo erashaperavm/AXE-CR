@@ -2,27 +2,18 @@ package compile
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 )
 
-func Rs2Sp1CPUTarget(rustProgramPath string) error {
-	cmd := exec.Command("cd", rustProgramPath)
-
-	out, err := cmd.Output()
+func Rs2Sp1Target(functionPath, workDir string) error {
+	cmd := exec.Command("sh", "-c", "cargo proof build")
+	cmd.Dir = functionPath
+	cmd.Env = append(os.Environ(), fmt.Sprintf("CARGO_TARGET_DIR=%s", workDir))
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return err
+		return fmt.Errorf("command failed: %w, output: %s", err, out)
 	}
-
 	fmt.Println(string(out))
-
-	cmd = exec.Command("cargo", "proof", "build")
-
-	out, err = cmd.Output()
-	if err != nil {
-		return err
-	}
-
-	fmt.Println(string(out))
-
 	return nil
 }

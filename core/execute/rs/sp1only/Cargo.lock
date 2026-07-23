@@ -1033,7 +1033,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "exerssp1onlycpu"
+name = "exerssp1only"
 version = "0.1.0"
 dependencies = [
  "anyhow",

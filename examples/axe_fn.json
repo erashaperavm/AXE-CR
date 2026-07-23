@@ -1,0 +1,6 @@
+{
+  "source_language": "rs",
+  "target_vrf": "sp1only",
+  "function_name": "my_func",
+  "prove_type": "PLONK"
+}
