@@ -9,7 +9,7 @@ type Memory struct {
 	Heap  map[int64][]byte
 }
 
-func NewMemory() *Memory {
+func NewMemoryObj() *Memory {
 	return &Memory{
 		Stack: make(map[int64]int64),
 		Heap:  make(map[int64][]byte),
@@ -30,57 +30,53 @@ func (m *Memory) AllocHeap(size int64) Ptr {
 	return Ptr{Kind: Heap, Pointer: addr}
 }
 
-func (m *Memory) ReadInt64(p Ptr) (int64, bool) {
-	if p.Kind != Stack {
+func (m *Memory) ReadStack(ptr Ptr) (int64, bool) {
+	if ptr.Kind != Stack {
 		return 0, false
 	}
-	val, ok := m.Stack[p.Pointer]
-	return val, ok
+	i, ok := m.Stack[ptr.Pointer]
+	if !ok {
+		return 0, false
+	}
+
+	return i, true
 }
 
-func (m *Memory) WriteInt64(p Ptr, val int64) bool {
-	if p.Kind != Stack {
+func (m *Memory) WriteStack(data int64, ptr Ptr) bool {
+	if ptr.Kind != Stack {
 		return false
 	}
-	m.Stack[p.Pointer] = val
+	_, ok := m.Stack[ptr.Pointer]
+	if !ok {
+		// unexisted ptr
+		return false
+	}
+	m.Stack[ptr.Pointer] = data
 	return true
 }
 
-func (m *Memory) ReadBytes(p Ptr) ([]byte, bool) {
-	if p.Kind != Heap {
+func (m *Memory) ReadHeap(ptr Ptr) ([]byte, bool) {
+	if ptr.Kind != Heap {
 		return nil, false
 	}
-	b, ok := m.Heap[p.Pointer]
-	return b, ok
+	b, ok := m.Heap[ptr.Pointer]
+	if !ok {
+		return nil, false
+	}
+
+	return b, true
 }
 
-func (m *Memory) WriteBytes(p Ptr, data []byte) bool {
-	if p.Kind != Heap {
+func (m *Memory) WriteHeap(data []byte, ptr Ptr) bool {
+	if ptr.Kind != Heap {
 		return false
 	}
-	b, ok := m.Heap[p.Pointer]
-	if !ok || len(b) != len(data) {
+	_, ok := m.Heap[ptr.Pointer]
+	if !ok {
 		return false
 	}
-	copy(b, data)
+	m.Heap[ptr.Pointer] = data
 	return true
-}
-
-func (m *Memory) AllocString(s string) Ptr {
-	data := []byte(s)
-	ptr := m.AllocHeap(int64(len(data)))
-	if b, ok := m.Heap[ptr.Pointer]; ok {
-		copy(b, data)
-	}
-	return ptr
-}
-
-func (m *Memory) AllocSlice(data []byte) Ptr {
-	ptr := m.AllocHeap(int64(len(data)))
-	if b, ok := m.Heap[ptr.Pointer]; ok {
-		copy(b, data)
-	}
-	return ptr
 }
 
 func (m *Memory) Free(p Ptr) {

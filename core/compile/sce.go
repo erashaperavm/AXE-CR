@@ -11,12 +11,12 @@ import (
 func SceFunctions(programPath, workdir string) error {
 	// 列出 src/functions 目录下的 function name
 	basePath := filepath.Join(programPath, "src", "functions")
-	entries, err := os.ReadDir(basePath)
+	functions, err := os.ReadDir(basePath)
 	if err != nil {
 		return err
 	}
 	var functionNames []string
-	for _, entry := range entries {
+	for _, entry := range functions {
 		if entry.IsDir() {
 			functionNames = append(functionNames, entry.Name())
 		}
@@ -87,6 +87,27 @@ func SceFunctions(programPath, workdir string) error {
 			return axeerr.ExpectedLanguage
 		}
 	}
+
+	return nil
+}
+
+func SmartContract(programPath, workdir string) error {
+	scSetPath := filepath.Join(programPath, "src", "entries")
+	scPathEntries, err := os.ReadDir(scSetPath)
+	if err != nil {
+		return err
+	}
+	var scPaths []string
+	for _, scPathEntry := range scPathEntries {
+		if !scPathEntry.IsDir() {
+			scPaths = append(scPaths, scPathEntry.Name())
+		}
+		continue
+	}
+
+	// 编译为字节码
+
+	// todo
 
 	return nil
 }

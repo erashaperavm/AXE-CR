@@ -10,20 +10,32 @@ const (
 	OP_OUTPUT
 
 	// memory manage
-	OP_CREATE
+	OP_ALLOC
 	OP_UPDATE
 	OP_DROP
+
+	// arithmetic
+	OP_ADD
+	OP_SUB
+	OP_MUL
+	OP_DIV
+
+	// compare
+	OP_CMP_INT
+	OP_CMP_BYTES
+
+	// jump
+	OP_JMP
+	OP_IF
 
 	// block token
 	OP_BEGIN
 	OP_END
 
-	// condition
-	OP_LOOP
-	OP_JMP
-	OP_IF
-	OP_ELSE
-	OP_ELSIF
+	// call function
+	OP_CALL_RS
+	OP_CALL_C
+	OP_CALL_CPP
 )
 
 type PtrKind byte
@@ -40,15 +52,16 @@ type Ptr struct {
 
 type Instruction struct {
 	Op            Opcode
-	InNum         int64
-	OuNum         int64
-	InType        []string
-	OutType       []string
-	InIdentifier  []string
-	OutIdentifier []string
+	ArgNum        int64
+	ArgType       []string
+	ArgIdentifier []string
 }
 
 type Block struct {
 	BeginPC int64
-	EndPc   int64
+	EndPC   int64
+}
+
+type NativeType interface {
+	int64 | []byte
 }

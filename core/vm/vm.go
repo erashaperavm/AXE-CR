@@ -1,36 +1,49 @@
 package vm
 
 import (
+	"bytes"
 	"fmt"
 	"strconv"
 )
 
-type VM struct {
-	Code   []Instruction
-	PC     int64          // 第几行了
-	Mem    *Memory        // 简单的堆栈模型
-	Vars   map[string]Ptr // 变量名称 -> 内存地址
-	Blocks map[int64]Block
-	Env    *Environment // 调用外部函数
-	Debug  bool         // 调试模式
+type VM[T NativeType] struct {
+	Code      []Instruction   // 字节码
+	PC        int64           // 第几行了
+	Mem       *Memory         // 简单的堆栈模型
+	Vars      map[string]Ptr  // 变量名称 -> 内存地址
+	Blocks    map[int64]Block // 代码标记块
+	Env       *Environment[T] // 调用外部函数
+	Debug     bool            // 调试模式
+	TraceMode bool            // 是否启用轨迹
 }
 
 // NewVM 创建一个 VM，初始化内存与变量表
-func NewVM(code []Instruction, env *Environment) *VM {
-	return &VM{
-		Code:   code,
-		PC:     0,
-		Mem:    NewMemory(),
-		Vars:   make(map[string]Ptr),
-		Blocks: make(map[int64]Block),
-		Env:    env,
+func NewVM[T NativeType](code []Instruction, env *Environment[T], debug bool, traceMode bool) *VM[T] {
+	return &VM[T]{
+		Code:      code,
+		PC:        0,
+		Mem:       NewMemoryObj(),
+		Vars:      make(map[string]Ptr),
+		Blocks:    make(map[int64]Block),
+		Env:       env,
+		Debug:     debug,
+		TraceMode: traceMode,
 	}
 }
 
-// DeclareVar 声明一个变量并分配栈空间，返回栈指针
-func (vm *VM) DeclareVar(name string) Ptr {
+// AllocVar 声明一个变量并分配栈空间，返回指针; size only be needed for heap
+func (vm *VM[T]) AllocVar(name string, memType PtrKind, size int64) Ptr {
 	if _, exists := vm.Vars[name]; !exists {
-		ptr := vm.Mem.AllocStack()
+		var ptr Ptr
+
+		switch memType {
+		case Stack:
+			ptr = vm.Mem.AllocStack()
+		case Heap:
+			ptr = vm.Mem.AllocHeap(size)
+		default:
+			panic(fmt.Sprintf("unsupported mem type: %v", memType))
+		}
 		vm.Vars[name] = ptr
 		return ptr
 	}
@@ -38,63 +51,101 @@ func (vm *VM) DeclareVar(name string) Ptr {
 }
 
 // GetVar 获取变量值
-func (vm *VM) GetVar(name string) (int64, bool) {
+func (vm *VM[T]) GetVar(name string) (T, bool) {
 	ptr, ok := vm.Vars[name]
 	if !ok {
-		return 0, false
+		var zero T
+		return zero, false
 	}
-	return vm.Mem.ReadInt64(ptr)
+	var readVal interface{}
+	switch ptr.Kind {
+	case Stack:
+		v, ok := vm.Mem.ReadStack(ptr)
+		if !ok {
+			var zero T
+			return zero, false
+		}
+		readVal = v
+	case Heap:
+		v, ok := vm.Mem.ReadHeap(ptr)
+		if !ok {
+			var zero T
+			return zero, false
+		}
+		readVal = v
+	default:
+		panic(fmt.Sprintf("unsupported ptr kind: %v", ptr.Kind))
+	}
+	return readVal.(T), true
 }
 
-// SetVar 设置变量值
-func (vm *VM) SetVar(name string, val int64) bool {
+// UpdateVarByIdentifier 设置变量值
+func (vm *VM[T]) UpdateVarByIdentifier(name string, valIdentifier string) bool {
+	targetPtr, ok := vm.Vars[name]
+	if !ok {
+		return false
+	}
+	dataPtr, ok := vm.Vars[valIdentifier]
+	if !ok {
+		return false
+	}
+
+	if targetPtr.Kind != dataPtr.Kind {
+		return false
+	}
+
+	switch dataPtr.Kind {
+	case Stack:
+		data, ok := vm.Mem.ReadStack(dataPtr)
+		if !ok {
+			return false
+		}
+		v, ok := any(data).(int64)
+		if !ok {
+			panic(fmt.Sprintf("type mismatch: expected int64 for Stack, got %T", data))
+		}
+		return vm.Mem.WriteStack(v, targetPtr)
+	case Heap:
+		data, ok := vm.Mem.ReadHeap(dataPtr)
+		if !ok {
+			return false
+		}
+		v, ok := any(data).([]byte)
+		if !ok {
+			panic(fmt.Sprintf("type mismatch: expected []byte for Heap, got %T", data))
+		}
+		return vm.Mem.WriteHeap(v, targetPtr)
+	default:
+		panic(fmt.Sprintf("unsupported ptr kind: %v", dataPtr.Kind))
+	}
+}
+
+func (vm *VM[T]) UpdateVarBySurfaceInt64(name string, i int64) bool {
 	ptr, ok := vm.Vars[name]
 	if !ok {
 		return false
 	}
-	return vm.Mem.WriteInt64(ptr, val)
+	if ptr.Kind != Stack {
+		return false
+	}
+
+	return vm.Mem.WriteStack(i, ptr)
 }
 
-// CreateVar 创建变量并分配内存，若变量已存在则返回错误
-func (vm *VM) CreateVar(name, varType string, size int64) error {
-	if _, exists := vm.Vars[name]; exists {
-		return fmt.Errorf("variable '%s' already exists", name)
-	}
-	var ptr Ptr
-	switch varType {
-	case "int", "int8", "int16", "int32", "int64",
-		"uint", "uint8", "uint16", "uint32", "uint64", "":
-		ptr = vm.Mem.AllocStack()
-	case "string":
-		ptr = vm.Mem.AllocString("")
-	case "slice":
-		ptr = vm.Mem.AllocSlice([]byte{})
-	case "heap":
-		if size <= 0 {
-			return fmt.Errorf("invalid heap size for variable '%s'", name)
-		}
-		ptr = vm.Mem.AllocHeap(size)
-	default:
-		return fmt.Errorf("unsupported variable type '%s'", varType)
-	}
-	vm.Vars[name] = ptr
-	return nil
-}
-
-// UpdateVar 更新栈变量（int64）的值，变量不存在时返回错误
-func (vm *VM) UpdateVar(name string, value int64) error {
+func (vm *VM[T]) UpdateVarBySurfaceBytes(name string, data []byte) bool {
 	ptr, ok := vm.Vars[name]
 	if !ok {
-		return fmt.Errorf("variable '%s' not found", name)
+		return false
 	}
-	if !vm.Mem.WriteInt64(ptr, value) {
-		return fmt.Errorf("failed to write to variable '%s'", name)
+	if ptr.Kind != Heap {
+		return false
 	}
-	return nil
+
+	return vm.Mem.WriteHeap(data, ptr)
 }
 
 // DropVar 删除变量并释放对应的栈/堆内存
-func (vm *VM) DropVar(name string) error {
+func (vm *VM[T]) DropVar(name string) error {
 	ptr, ok := vm.Vars[name]
 	if !ok {
 		return fmt.Errorf("variable '%s' not found", name)
@@ -104,50 +155,7 @@ func (vm *VM) DropVar(name string) error {
 	return nil
 }
 
-// UpdateVarByType 根据类型更新变量值
-func (vm *VM) UpdateVarByType(name, varType, valueStr string) error {
-	switch varType {
-	case "int", "int8", "int16", "int32", "int64",
-		"uint", "uint8", "uint16", "uint32", "uint64", "":
-		val, err := strconv.ParseInt(valueStr, 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid integer value '%s': %v", valueStr, err)
-		}
-		return vm.UpdateVar(name, val)
-	case "string":
-		return vm.UpdateVarString(name, valueStr)
-	case "slice":
-		return vm.UpdateVarSlice(name, []byte(valueStr))
-	default:
-		return fmt.Errorf("unsupported type '%s' for update", varType)
-	}
-}
-
-// UpdateVarString 更新字符串变量
-func (vm *VM) UpdateVarString(name, value string) error {
-	ptr, ok := vm.Vars[name]
-	if !ok {
-		return fmt.Errorf("variable '%s' not found", name)
-	}
-	vm.Mem.Free(ptr)
-	newPtr := vm.Mem.AllocString(value)
-	vm.Vars[name] = newPtr
-	return nil
-}
-
-// UpdateVarSlice 更新切片变量
-func (vm *VM) UpdateVarSlice(name string, data []byte) error {
-	ptr, ok := vm.Vars[name]
-	if !ok {
-		return fmt.Errorf("variable '%s' not found", name)
-	}
-	vm.Mem.Free(ptr)
-	newPtr := vm.Mem.AllocSlice(data)
-	vm.Vars[name] = newPtr
-	return nil
-}
-
-func (vm *VM) Run() error {
+func (vm *VM[T]) Run() error {
 	for vm.PC < int64(len(vm.Code)) {
 		ins := vm.Code[vm.PC]
 
@@ -155,170 +163,499 @@ func (vm *VM) Run() error {
 			fmt.Println(fmt.Sprintf("")) // todo
 		}
 
+		// todo : fmt 和 types 由 compiler 保证
 		switch ins.Op {
 		case OP_READ:
+			/*
+				OP_READ -> MAIN INS
+				3 -> 3 args
+
+				[]byte
+				Ptr
+				Ptr
+
+				pos -> 链上位置
+				data -> 使用变量来存储读取的数据
+				ok -> 是否读取成功
+			*/
+
+			pos, ok := vm.GetVar(ins.ArgIdentifier[0])
+			if !ok {
+				return fmt.Errorf("unable to read: variable '%s' not found", ins.ArgIdentifier[0])
+			}
+			pos_, ok := any(pos).([]byte)
+			if !ok {
+				return fmt.Errorf("type mismatch: expected int64 for Stack, got %T", pos)
+			}
+
+			dataPtr, ok := vm.Vars[ins.ArgIdentifier[1]]
+			if !ok {
+				return fmt.Errorf("unable to read: ptr '%s' not found", ins.ArgIdentifier[1])
+			}
+
+			okPtr, ok := vm.Vars[ins.ArgIdentifier[2]]
+			if !ok {
+				return fmt.Errorf("unable to read: okPtr '%s' not found", ins.ArgIdentifier[2])
+			}
+
+			vm.Env.Read(pos_, dataPtr, okPtr)
+
+			vm.PC++
 
 		case OP_INPUT:
+			/*
+				OP_INPUT -> MAIN INS
+				2 -> 2 args
+
+				int64
+				Ptr
+
+				idx -> 输入参数第几个
+				data -> 使用变量来存储输入的数据
+			*/
+
+			idx, ok := any(vm.Vars[ins.ArgIdentifier[0]]).(int64)
+			if !ok {
+				return fmt.Errorf("variable '%s' not found", ins.ArgIdentifier[0])
+			}
+			dataPtr, ok := vm.Vars[ins.ArgIdentifier[1]]
+			if !ok {
+				return fmt.Errorf("unable to read: ptr '%s' not found", ins.ArgIdentifier[1])
+			}
+
+			vm.Env.Input(idx, dataPtr)
+
+			vm.PC++
 
 		case OP_WRITE:
+			/*
+				OP_WRITE -> MAIN INS
+				3 -> 3 args
+
+				[]byte
+				Ptr
+				Ptr
+
+				pos -> 链上位置
+				data -> 使用变量来存储将要写入的数据
+				ok -> 是否写入成功
+			*/
+
+			pos, ok := vm.GetVar(ins.ArgIdentifier[0])
+			if !ok {
+				return fmt.Errorf("unable to read: variable '%s' not found", ins.ArgIdentifier[0])
+			}
+			pos_, ok := any(pos).([]byte)
+			if !ok {
+				return fmt.Errorf("type mismatch: expected int64 for Stack, got %T", pos)
+			}
+
+			dataPtr, ok := vm.Vars[ins.ArgIdentifier[1]]
+			if !ok {
+				return fmt.Errorf("unable to read: ptr '%s' not found", ins.ArgIdentifier[1])
+			}
+
+			okPtr, ok := vm.Vars[ins.ArgIdentifier[2]]
+			if !ok {
+				return fmt.Errorf("unable to read: okPtr '%s' not found", ins.ArgIdentifier[2])
+			}
+
+			vm.Env.Write(pos_, dataPtr, okPtr)
+
+			vm.PC++
 
 		case OP_OUTPUT:
+			/*
+				OP_OUTPUT -> MAIN INS
+				2 -> 2 args
 
-		case OP_CREATE:
-			// 格式: CREATE var_type, var_name [, size] (heap 时需要 size)
-			if len(ins.InIdentifier) < 1 || len(ins.InType) < 1 {
-				return fmt.Errorf("CREATE: insufficient input arguments")
+				int64
+				Ptr
+
+				idx -> 输出参数第几个
+				data -> 使用变量来存储将要输出的数据
+			*/
+
+			idx, ok := any(vm.Vars[ins.ArgIdentifier[0]]).(int64)
+			if !ok {
+				return fmt.Errorf("variable '%s' not found", ins.ArgIdentifier[0])
 			}
-			varType := ins.InType[0]
-			varName := ins.InIdentifier[0]
-			var size int64 = 0
-			if varType == "heap" {
-				if len(ins.InIdentifier) < 2 {
-					return fmt.Errorf("CREATE heap: missing size argument")
-				}
-				var err error
-				size, err = strconv.ParseInt(ins.InIdentifier[1], 10, 64)
-				if err != nil {
-					return fmt.Errorf("CREATE heap: invalid size '%s': %v", ins.InIdentifier[1], err)
-				}
+			dataPtr, ok := vm.Vars[ins.ArgIdentifier[1]]
+			if !ok {
+				return fmt.Errorf("unable to read: ptr '%s' not found", ins.ArgIdentifier[1])
 			}
-			if err := vm.CreateVar(varName, varType, size); err != nil {
-				return err
+
+			vm.Env.Output(idx, dataPtr)
+
+			vm.PC++
+
+		case OP_ALLOC:
+			/*
+				OP_ALLOC
+				3 -> 3 args
+
+				var_name
+				int64
+				int64
+
+				varname _> 变量名称
+				mem_type -> 内存类型（编译器自动根据数据类型判断：int64 -> stack; []byte -> heap）
+				size -> 分配内存大小 (如果为 heap）
+			*/
+
+			varName := ins.ArgIdentifier[0]
+			memType, err := strconv.ParseInt(ins.ArgIdentifier[1], 10, 64)
+			if err != nil {
+				return fmt.Errorf("variable '%s' not found", ins.ArgIdentifier[1])
 			}
+			size, err := strconv.ParseInt(ins.ArgIdentifier[2], 10, 64)
+			if err != nil {
+				return fmt.Errorf("unable to read: size '%s' not found", ins.ArgIdentifier[2])
+			}
+
+			vm.AllocVar(varName, PtrKind(memType), size)
+
 			vm.PC++
 
 		case OP_UPDATE:
-			// 格式: UPDATE var_type, var_name, value
-			if len(ins.InIdentifier) < 2 || len(ins.InType) < 1 {
-				return fmt.Errorf("UPDATE: insufficient input arguments")
+			/*
+				OP_UPDATE
+				2 -> 2 args
+
+				var_name
+				NativeType / varname -> 字面值（非变量，int64 数字或 []byte '' 数据）
+
+				varname -> 变量名称
+				surface / varname -> 字面值
+			*/
+
+			const (
+				surfaceBytes = iota
+				surfaceInt64
+				identifier
+			)
+
+			var kind byte
+			var num int64
+			var byt []byte
+
+			if ins.ArgIdentifier[1][0] == '\'' || ins.ArgIdentifier[1][len(ins.ArgIdentifier[1])] == '\'' {
+				// 是 []byte
+				kind = surfaceBytes
+				byt = []byte(ins.ArgIdentifier[1])
+			} else {
+				num_, err := strconv.ParseInt(ins.ArgIdentifier[1], 10, 64)
+				if err != nil {
+					// 不是 int64
+					kind = identifier
+				}
+				// 是 int64
+				kind = surfaceInt64
+				num = num_
 			}
-			varType := ins.InType[0]
-			varName := ins.InIdentifier[0]
-			if err := vm.UpdateVarByType(varName, varType, ins.InIdentifier[1]); err != nil {
-				return err
+
+			switch kind {
+			case surfaceInt64:
+				ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[0], num)
+				if !ok {
+					return fmt.Errorf("unable to update: var '%s' not found", ins.ArgIdentifier[0])
+				}
+			case surfaceBytes:
+				ok := vm.UpdateVarBySurfaceBytes(ins.ArgIdentifier[0], byt)
+				if !ok {
+					return fmt.Errorf("unable to update: var '%s' not found", ins.ArgIdentifier[0])
+				}
+			case identifier:
+				ok := vm.UpdateVarByIdentifier(ins.ArgIdentifier[0], ins.ArgIdentifier[1])
+				if !ok {
+					return fmt.Errorf("unable to update: var '%s' not found", ins.ArgIdentifier[0])
+				}
+			default:
+				return fmt.Errorf("unable to update: var '%s' not found", ins.ArgIdentifier[0])
 			}
+
 			vm.PC++
 
 		case OP_DROP:
-			// 格式: DROP var_name
-			if len(ins.InIdentifier) < 1 {
-				return fmt.Errorf("DROP: missing variable name")
-			}
-			varName := ins.InIdentifier[0]
-			if err := vm.DropVar(varName); err != nil {
+			/*
+				OP_DROP
+				1 -> 1 arg
+
+				var_name
+			*/
+
+			err := vm.DropVar(ins.ArgIdentifier[0])
+			if err != nil {
 				return err
 			}
+
 			vm.PC++
 
-		case OP_BEGIN:
-			// 格式： OP_BEGIN block_id
-			if len(ins.InIdentifier) < 1 {
-				return fmt.Errorf("OP_BEGIN: missing block label")
-			}
-			blockIdString := ins.InIdentifier[0]
-			blockId, err := strconv.ParseInt(blockIdString, 10, 64)
+		case OP_ADD:
+			/*
+				OP_ADD
+				3 -> 3 args
+
+				int64
+				int64
+				var_name
+
+				add1
+				add2
+				sum
+			*/
+
+			aNum, bNum, err := vm.arithmeticPrepare(ins, "add")
 			if err != nil {
-				return fmt.Errorf("OP_BEGIN: illegal block id")
-			}
-			if _, exists := vm.Blocks[blockId]; exists {
-				return fmt.Errorf("OP_BEGIN: existed block")
+				return err
 			}
 
-			beginPC := vm.PC // 记录当前 BEGIN 的地址
-			privPC := vm.PC
-			foundEnd := false
-			for privPC < int64(len(vm.Code)) {
-				if vm.Code[privPC].Op == OP_END {
-					vm.Blocks[blockId] = Block{
-						BeginPC: beginPC,
-						EndPc:   privPC,
-					}
-					foundEnd = true
-					break
-				}
-				privPC++
-			}
-			if !foundEnd {
-				return fmt.Errorf("OP_BEGIN: unclosed block")
-			}
-			vm.PC++ // 进入循环体第一条指令
+			vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum+bNum)
 
-		case OP_LOOP:
-			// 格式：OP_LOOP block_id
-			if len(ins.InIdentifier) < 1 {
-				return fmt.Errorf("OP_LOOP: missing block_id")
-			}
-			blockIdString := ins.InIdentifier[0]
-			blockId, err := strconv.ParseInt(blockIdString, 10, 64)
+			vm.PC++
+
+		case OP_SUB:
+			/*
+				OP_SUB
+				3 -> 3 args
+
+				int64
+				int64
+				var_name
+
+				add1
+				add2
+				sum
+			*/
+
+			aNum, bNum, err := vm.arithmeticPrepare(ins, "sub")
 			if err != nil {
-				return fmt.Errorf("OP_LOOP: illegal block id")
+				return err
 			}
-			block, exists := vm.Blocks[blockId]
-			if !exists {
-				return fmt.Errorf("OP_LOOP: undefined block %d", blockId)
+
+			vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum-bNum)
+
+			vm.PC++
+
+		case OP_MUL:
+			/*
+				OP_MUL
+				3 -> 3 args
+
+				int64
+				int64
+				var_name
+
+				add1
+				add2
+				sum
+			*/
+
+			aNum, bNum, err := vm.arithmeticPrepare(ins, "mul")
+			if err != nil {
+				return err
 			}
-			vm.PC = block.BeginPC
-			continue // 跳过末尾的 vm.PC++
+
+			vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum*bNum)
+
+			vm.PC++
+
+		case OP_DIV:
+			/*
+				OP_DIV
+				3 -> 3 args
+
+				int64
+				int64
+				var_name
+
+				add1
+				add2
+				sum
+			*/
+
+			aNum, bNum, err := vm.arithmeticPrepare(ins, "div")
+			if err != nil {
+				return err
+			}
+
+			vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum/bNum)
+
+			vm.PC++
+
+		case OP_CMP_INT:
+			/*
+				OP_CMP_INT
+				3 -> 3 args
+
+				int64
+				int64
+				var_name (int64(bool))
+
+				add1
+				add2
+				sum
+			*/
+
+			aNum, bNum, err := vm.arithmeticPrepare(ins, "cmp_int")
+			if err != nil {
+				return err
+			}
+
+			var boolean int64
+
+			if aNum == bNum {
+				boolean = 1
+			} else {
+				boolean = 0
+			}
+
+			ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
+			if !ok {
+				return fmt.Errorf("cmp_int: var_name not found")
+			}
+
+			vm.PC++
+
+		case OP_CMP_BYTES:
+			/*
+				OP_CMP_BYTES
+				3 -> 3 args
+
+				int64
+				int64
+				var_name (int64(bool))
+
+				add1
+				add2
+				sum
+			*/
+
+			aBytes, bBytes, err := vm.extractBytesForCMP(ins)
+			if err != nil {
+				return err
+			}
+
+			var boolean int64
+
+			if bytes.Equal(aBytes, bBytes) {
+				boolean = 1
+			} else {
+				boolean = 0
+			}
+
+			ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
+			if !ok {
+				return fmt.Errorf("cmp_bytes: var_name not found")
+			}
+
+			vm.PC++
 
 		case OP_JMP:
-			// 格式：JMP target_pc
-			if len(ins.InIdentifier) < 1 {
-				return fmt.Errorf("JMP: missing target address")
-			}
-			target, err := strconv.ParseInt(ins.InIdentifier[0], 10, 64)
-			if err != nil {
-				return fmt.Errorf("JMP: invalid target '%s': %v", ins.InIdentifier[0], err)
-			}
-			vm.PC = target
-			continue // 跳过 vm.PC++，避免多移一次
-
 		case OP_IF:
-			// 格式：IF var_name, target_pc
-			if len(ins.InIdentifier) < 2 {
-				return fmt.Errorf("IF: insufficient arguments (var_name, target_pc)")
-			}
-			varName := ins.InIdentifier[0]
-			target, err := strconv.ParseInt(ins.InIdentifier[1], 10, 64)
-			if err != nil {
-				return fmt.Errorf("IF: invalid target '%s': %v", ins.InIdentifier[1], err)
-			}
-			val, ok := vm.GetVar(varName)
-			if !ok {
-				return fmt.Errorf("IF: variable '%s' not found", varName)
-			}
-			if val == 0 {
-				vm.PC = target
-				continue // 跳过 vm.PC++
-			}
-			vm.PC++
-
-		case OP_ELSIF:
-			// 格式：ELSIF var_name, target_pc
-			if len(ins.InIdentifier) < 2 {
-				return fmt.Errorf("ELSIF: insufficient arguments (var_name, target_pc)")
-			}
-			varName := ins.InIdentifier[0]
-			target, err := strconv.ParseInt(ins.InIdentifier[1], 10, 64)
-			if err != nil {
-				return fmt.Errorf("ELSIF: invalid target '%s': %v", ins.InIdentifier[1], err)
-			}
-			val, ok := vm.GetVar(varName)
-			if !ok {
-				return fmt.Errorf("ELSIF: variable '%s' not found", varName)
-			}
-			if val == 0 {
-				vm.PC = target
-				continue // 跳过 vm.PC++
-			}
-			vm.PC++
-
-		case OP_ELSE:
-			// ELSE 作为标记，直接顺序执行
-			vm.PC++
+		case OP_BEGIN:
+		case OP_END:
+		case OP_CALL_RS:
+		case OP_CALL_C:
+			// todo
+		case OP_CALL_CPP:
+			// todo
 
 		default:
 			return fmt.Errorf("unknown opcode: %d", ins.Op)
 		}
 	}
 	return nil
+}
+
+func (vm *VM[T]) arithmeticPrepare(ins Instruction, opName string) (int64, int64, error) {
+	var aNum int64
+	var bNum int64
+	var err error
+
+	if ins.ArgIdentifier[0][0] == '\'' || ins.ArgIdentifier[0][len(ins.ArgIdentifier[0])] == '\'' {
+		// 是 []byte
+		return 0, 0, fmt.Errorf("unable to %v: var '%s' is []byte", opName, ins.ArgIdentifier[0])
+	}
+	aNum, err = strconv.ParseInt(ins.ArgIdentifier[0], 10, 64)
+	if err != nil {
+		// 不是 int64
+		aNum_, ok := vm.GetVar(ins.ArgIdentifier[0])
+		if !ok {
+			return 0, 0, fmt.Errorf("unable to read: var '%s' not found", ins.ArgIdentifier[0])
+		}
+		aNum, ok = any(aNum_).(int64)
+		if !ok {
+			return 0, 0, fmt.Errorf("unable to read: var '%s' is not int64", ins.ArgIdentifier[0])
+		}
+	}
+	// 是 int64
+	// 不做
+
+	if ins.ArgIdentifier[1][0] == '\'' || ins.ArgIdentifier[1][len(ins.ArgIdentifier[1])] == '\'' {
+		// 是 []byte
+		return 0, 0, fmt.Errorf("unable to %v: var '%s' is []byte", opName, ins.ArgIdentifier[1])
+	}
+	bNum, err = strconv.ParseInt(ins.ArgIdentifier[1], 10, 64)
+	if err != nil {
+		// 不是 int64
+		bNum_, ok := vm.GetVar(ins.ArgIdentifier[1])
+		if !ok {
+			return 0, 0, fmt.Errorf("unable to read: var '%s' not found", ins.ArgIdentifier[1])
+		}
+		bNum, ok = any(bNum_).(int64)
+		if !ok {
+			return 0, 0, fmt.Errorf("unable to read: var '%s' is not int64", ins.ArgIdentifier[1])
+		}
+	}
+	// 是 int64
+	// 不做
+
+	if ins.ArgIdentifier[2][0] == '\'' || ins.ArgIdentifier[2][len(ins.ArgIdentifier[2])] == '\'' {
+		// 是 []byte
+		return 0, 0, fmt.Errorf("unable to %v: var '%s' is []byte", opName, ins.ArgIdentifier[2])
+	}
+	_, err = strconv.ParseInt(ins.ArgIdentifier[2], 10, 64)
+	if err != nil {
+		// 不是 int64
+		// 不做
+	} else {
+		// 是 int64
+		return 0, 0, fmt.Errorf("unable to %v: sum var '%s' is int64", opName, ins.ArgIdentifier[2])
+	}
+	return aNum, bNum, nil
+}
+
+func (vm *VM[T]) extractBytesForCMP(ins Instruction) ([]byte, []byte, error) {
+	var aBytes []byte
+	var bBytes []byte
+	var err error
+
+	if ins.ArgIdentifier[0][0] == '\'' || ins.ArgIdentifier[0][len(ins.ArgIdentifier[0])] == '\'' {
+		// 是 []byte
+		aBytes = []byte(ins.ArgIdentifier[0])
+	} else {
+		return nil, nil, fmt.Errorf("unable to cmp_bytes: var '%s' is not []byte", ins.ArgIdentifier[0])
+	}
+
+	if ins.ArgIdentifier[1][0] == '\'' || ins.ArgIdentifier[1][len(ins.ArgIdentifier[1])] == '\'' {
+		// 是 []byte
+		bBytes = []byte(ins.ArgIdentifier[1])
+	} else {
+		return nil, nil, fmt.Errorf("unable to cmp_bytes: var '%s' is not []byte", ins.ArgIdentifier[0])
+	}
+
+	if ins.ArgIdentifier[2][0] == '\'' || ins.ArgIdentifier[2][len(ins.ArgIdentifier[2])] == '\'' {
+		// 是 []byte
+		return nil, nil, fmt.Errorf("unable to cmp_bytes: var '%s' is []byte", ins.ArgIdentifier[2])
+	}
+	_, err = strconv.ParseInt(ins.ArgIdentifier[2], 10, 64)
+	if err != nil {
+		// 不是 int64
+		// 不做
+	} else {
+		// 是 int64
+		return nil, nil, fmt.Errorf("unable to cmp_bytes: sum var '%s' is int64")
+	}
+	return aBytes, bBytes, nil
 }
