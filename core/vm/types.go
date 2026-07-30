@@ -20,9 +20,12 @@ const (
 	OP_MUL
 	OP_DIV
 
+	// equal
+	OP_EQ_INT
+	OP_EQ_BYTES
+
 	// compare
-	OP_CMP_INT
-	OP_CMP_BYTES
+	OP_LARGE_INT
 
 	// jump
 	OP_JMP
@@ -52,7 +55,6 @@ type Ptr struct {
 
 type Instruction struct {
 	Op            Opcode
-	ArgNum        int64
 	ArgType       []string
 	ArgIdentifier []string
 }

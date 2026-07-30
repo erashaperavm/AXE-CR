@@ -1,0 +1,4 @@
+{
+  "req_input":["int64", "[]byte"],
+  "req_output": ["int64", "[]byte"]
+}

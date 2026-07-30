@@ -12,6 +12,10 @@ type AxeFunctionConfig struct {
 	FunctionName   string `json:"function_name"`
 	ProveType      string `json:"prove_type"`
 }
+type FunctionMeta struct {
+	ReqInput  []string `json:"req_input"`
+	ReqOutput []string `json:"req_output"`
+}
 
 // AxeProjectConfig represents the project-level configuration (axe.json at the program root).
 type AxeProjectConfig struct {

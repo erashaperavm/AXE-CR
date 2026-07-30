@@ -1,0 +1,8 @@
+1. real call rs
+2. maybe real io/rw
+3. trace mode
+4. debug mode
+5. compiler
+6. verify-sce
+7. 定时保存
+8. 证明压缩
