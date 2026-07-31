@@ -87,6 +87,52 @@ func (e *ErrUnexpectedEnd) Error() string {
 	return fmt.Sprintf("unexpected end: with label '%s'", e.Label)
 }
 
+type ErrUpdateVarBySurfaceInt64 struct {
+	VarName string
+	Surface int64
+}
+
+func (e *ErrUpdateVarBySurfaceInt64) Error() string {
+	return fmt.Sprintf("update var '%s' by surface int64 '%d' failed", e.VarName, e.Surface)
+}
+
+type ErrUpdateVarBySurfaceBytes struct {
+	VarName string
+	Surface []byte
+}
+
+func (e *ErrUpdateVarBySurfaceBytes) Error() string {
+	return fmt.Sprintf("update var '%s' by surface bytes '%v' failed", e.VarName, e.Surface)
+}
+
+type ErrRead struct {
+	Pos []byte
+	Err error
+}
+
+func (e *ErrRead) Error() string {
+	return fmt.Sprintf("read failed at position '%v': %v", e.Pos, e.Err)
+}
+
+type InputErr struct {
+	Index int64
+	Err   error
+}
+
+func (e *InputErr) Error() string {
+	return fmt.Sprintf("input at index '%d' failed: %v", e.Index, e.Err)
+}
+
+type OutputErr struct {
+	Index int64
+	Data  []byte
+	Err   error
+}
+
+func (e *OutputErr) Error() string {
+	return fmt.Sprintf("output at index '%d' with data '%v' failed: %v", e.Index, e.Data, e.Err)
+}
+
 // ============== Function Call (RS) Errors ==============
 
 // ErrFuncNotFound indicates the RS function was not found in the environment.
@@ -160,5 +206,3 @@ type ErrArithmetic struct {
 func (e *ErrArithmetic) Error() string {
 	return fmt.Sprintf("unable to %s: %v", e.Operation, e.Err)
 }
-
-func (e *ErrArithmetic) Unwrap() error { return e.Err }

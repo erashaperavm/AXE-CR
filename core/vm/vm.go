@@ -6,13 +6,16 @@ import (
 	"strconv"
 )
 
-type VM[T NativeType] struct {
+type VM struct {
+	ExeDir  string
+	WorkDir string
+
 	Code      []Instruction   // 字节码
 	PC        int64           // 第几行了
 	Mem       *Memory         // 简单的堆栈模型
 	Vars      map[string]Ptr  // 变量名称 -> 内存地址
 	Blocks    map[int64]Block // 代码标记块
-	Env       *Environment[T] // 调用外部函数
+	Env       *Environment    // 调用外部函数
 	Debug     bool            // 调试模式
 	TraceMode bool            // 是否启用轨迹
 	Traces    []Trace
@@ -23,8 +26,8 @@ type Trace struct {
 }
 
 // NewVM 创建一个 VM，初始化内存与变量表
-func NewVM[T NativeType](code []Instruction, env *Environment[T], debug bool, traceMode bool) *VM[T] {
-	return &VM[T]{
+func NewVM(code []Instruction, env *Environment, debug bool, traceMode bool) *VM {
+	return &VM{
 		Code:      code,
 		PC:        0,
 		Mem:       NewMemoryObj(),
@@ -37,7 +40,7 @@ func NewVM[T NativeType](code []Instruction, env *Environment[T], debug bool, tr
 }
 
 // AllocVar 声明一个变量并分配栈空间，返回指针; size only be needed for heap
-func (vm *VM[T]) AllocVar(name string, memType PtrKind, size int64) Ptr {
+func (vm *VM) AllocVar(name string, memType PtrKind, size int64) Ptr {
 	if _, exists := vm.Vars[name]; !exists {
 		var ptr Ptr
 
@@ -55,37 +58,26 @@ func (vm *VM[T]) AllocVar(name string, memType PtrKind, size int64) Ptr {
 	return vm.Vars[name] // 已存在则返回原指针
 }
 
-// GetVar 获取变量值
-func (vm *VM[T]) GetVar(name string) (T, bool) {
+// GetInt64Var 获取 Stack 变量值（int64）
+func (vm *VM) GetInt64Var(name string) (int64, bool) {
 	ptr, ok := vm.Vars[name]
-	if !ok {
-		var zero T
-		return zero, false
+	if !ok || ptr.Kind != Stack {
+		return 0, false
 	}
-	var readVal interface{}
-	switch ptr.Kind {
-	case Stack:
-		v, ok := vm.Mem.ReadStack(ptr)
-		if !ok {
-			var zero T
-			return zero, false
-		}
-		readVal = v
-	case Heap:
-		v, ok := vm.Mem.ReadHeap(ptr)
-		if !ok {
-			var zero T
-			return zero, false
-		}
-		readVal = v
-	default:
-		panic(fmt.Sprintf("unsupported ptr kind: %v", ptr.Kind))
+	return vm.Mem.ReadStack(ptr)
+}
+
+// GetBytesVar 获取 Heap 变量值（[]byte）
+func (vm *VM) GetBytesVar(name string) ([]byte, bool) {
+	ptr, ok := vm.Vars[name]
+	if !ok || ptr.Kind != Heap {
+		return nil, false
 	}
-	return readVal.(T), true
+	return vm.Mem.ReadHeap(ptr)
 }
 
 // UpdateVarByIdentifier 设置变量值
-func (vm *VM[T]) UpdateVarByIdentifier(name string, valIdentifier string) bool {
+func (vm *VM) UpdateVarByIdentifier(name string, valIdentifier string) bool {
 	targetPtr, ok := vm.Vars[name]
 	if !ok {
 		return false
@@ -105,27 +97,19 @@ func (vm *VM[T]) UpdateVarByIdentifier(name string, valIdentifier string) bool {
 		if !ok {
 			return false
 		}
-		v, ok := any(data).(int64)
-		if !ok {
-			panic(fmt.Sprintf("type mismatch: expected int64 for Stack, got %T", data))
-		}
-		return vm.Mem.WriteStack(v, targetPtr)
+		return vm.Mem.WriteStack(data, targetPtr)
 	case Heap:
 		data, ok := vm.Mem.ReadHeap(dataPtr)
 		if !ok {
 			return false
 		}
-		v, ok := any(data).([]byte)
-		if !ok {
-			panic(fmt.Sprintf("type mismatch: expected []byte for Heap, got %T", data))
-		}
-		return vm.Mem.WriteHeap(v, targetPtr)
+		return vm.Mem.WriteHeap(data, targetPtr)
 	default:
 		panic(fmt.Sprintf("unsupported ptr kind: %v", dataPtr.Kind))
 	}
 }
 
-func (vm *VM[T]) UpdateVarBySurfaceInt64(name string, i int64) bool {
+func (vm *VM) UpdateVarBySurfaceInt64(name string, i int64) bool {
 	ptr, ok := vm.Vars[name]
 	if !ok {
 		return false
@@ -137,7 +121,7 @@ func (vm *VM[T]) UpdateVarBySurfaceInt64(name string, i int64) bool {
 	return vm.Mem.WriteStack(i, ptr)
 }
 
-func (vm *VM[T]) UpdateVarBySurfaceBytes(name string, data []byte) bool {
+func (vm *VM) UpdateVarBySurfaceBytes(name string, data []byte) bool {
 	ptr, ok := vm.Vars[name]
 	if !ok {
 		return false
@@ -150,7 +134,7 @@ func (vm *VM[T]) UpdateVarBySurfaceBytes(name string, data []byte) bool {
 }
 
 // DropVar 删除变量并释放对应的栈/堆内存
-func (vm *VM[T]) DropVar(name string) error {
+func (vm *VM) DropVar(name string) error {
 	ptr, ok := vm.Vars[name]
 	if !ok {
 		return &ErrVarNotFound{Name: name}
@@ -160,7 +144,7 @@ func (vm *VM[T]) DropVar(name string) error {
 	return nil
 }
 
-func (vm *VM[T]) Run() error {
+func (vm *VM) Run() error {
 	for vm.PC < int64(len(vm.Code)) {
 		ins := vm.Code[vm.PC]
 
@@ -187,13 +171,9 @@ func (vm *VM[T]) Run() error {
 				ok -> 是否读取成功
 			*/
 
-			pos, ok := vm.GetVar(ins.ArgIdentifier[0])
+			pos_, ok := vm.GetBytesVar(ins.ArgIdentifier[0])
 			if !ok {
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
-			}
-			pos_, ok := any(pos).([]byte)
-			if !ok {
-				return &ErrTypeMismatch{Expected: "[]byte", Got: fmt.Sprintf("%T", pos)}
 			}
 
 			dataPtr, ok := vm.Vars[ins.ArgIdentifier[1]]
@@ -205,8 +185,51 @@ func (vm *VM[T]) Run() error {
 			if !ok {
 				return &ErrPtrNotFound{Name: ins.ArgIdentifier[2]}
 			}
+			if okPtr.Kind != Stack {
+				return &ErrTypeMismatch{Expected: "int64", Got: "bytes"}
+			}
 
-			vm.Env.Read(pos_, dataPtr, okPtr)
+			if dataPtr.Kind == Stack {
+				data, err := vm.Env.ReadInt64(pos_)
+				if err != nil {
+					// 更新 ok 为 false
+					ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
+					if !ok {
+						return &ErrUpdateVarBySurfaceInt64{
+							VarName: ins.ArgIdentifier[2],
+							Surface: 0,
+						}
+					}
+				}
+
+				err = vm.irUpdaterInt64(data, ins)
+				if err != nil {
+					return &ErrRead{
+						Pos: pos_,
+						Err: err,
+					}
+				}
+			} else {
+				data, err := vm.Env.ReadBytes(pos_)
+				if err != nil {
+					// 更新 ok 为 false
+					ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
+					if !ok {
+						return &ErrUpdateVarBySurfaceInt64{
+							VarName: ins.ArgIdentifier[2],
+							Surface: 0,
+						}
+					}
+				}
+
+				err = vm.irUpdaterBytes(data, ins)
+				if err != nil {
+					return &ErrRead{
+						Pos: pos_,
+						Err: err,
+					}
+				}
+			}
 
 			vm.PC++
 
@@ -221,7 +244,7 @@ func (vm *VM[T]) Run() error {
 				data -> 使用变量来存储输入的数据
 			*/
 
-			idx, ok := any(vm.Vars[ins.ArgIdentifier[0]]).(int64)
+			idx, ok := vm.GetInt64Var(ins.ArgIdentifier[0])
 			if !ok {
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
 			}
@@ -230,7 +253,25 @@ func (vm *VM[T]) Run() error {
 				return &ErrPtrNotFound{Name: ins.ArgIdentifier[1]}
 			}
 
-			vm.Env.Input(idx, dataPtr)
+			if dataPtr.Kind == Stack {
+				data := vm.Env.InputInt64(idx)
+				err := vm.irUpdaterInt64(data, ins)
+				if err != nil {
+					return &InputErr{
+						Index: idx,
+						Err:   err,
+					}
+				}
+			} else {
+				data := vm.Env.InputBytes(idx)
+				err := vm.irUpdaterBytes(data, ins)
+				if err != nil {
+					return &InputErr{
+						Index: idx,
+						Err:   err,
+					}
+				}
+			}
 
 			vm.PC++
 
@@ -247,26 +288,49 @@ func (vm *VM[T]) Run() error {
 				ok -> 是否写入成功
 			*/
 
-			pos, ok := vm.GetVar(ins.ArgIdentifier[0])
+			pos_, ok := vm.GetBytesVar(ins.ArgIdentifier[0])
 			if !ok {
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
-			}
-			pos_, ok := any(pos).([]byte)
-			if !ok {
-				return &ErrTypeMismatch{Expected: "[]byte", Got: fmt.Sprintf("%T", pos)}
 			}
 
 			dataPtr, ok := vm.Vars[ins.ArgIdentifier[1]]
 			if !ok {
-				return &ErrPtrNotFound{Name: ins.ArgIdentifier[1]}
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
 			}
 
-			okPtr, ok := vm.Vars[ins.ArgIdentifier[2]]
-			if !ok {
-				return &ErrPtrNotFound{Name: ins.ArgIdentifier[2]}
+			if dataPtr.Kind == Stack {
+				data, ok := vm.GetInt64Var(ins.ArgIdentifier[1])
+				if !ok {
+					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
+				}
+				err := vm.Env.WriteInt64(pos_, data)
+				if err != nil {
+					// 更新 ok 为 false
+					ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
+					if !ok {
+						return &ErrUpdateVarBySurfaceInt64{
+							VarName: ins.ArgIdentifier[2],
+							Surface: 0,
+						}
+					}
+				}
+			} else {
+				data, ok := vm.GetBytesVar(ins.ArgIdentifier[1])
+				if !ok {
+					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
+				}
+				err := vm.Env.WriteBytes(pos_, data)
+				if err != nil {
+					// 更新 ok 为 false
+					ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
+					if !ok {
+						return &ErrUpdateVarBySurfaceInt64{
+							VarName: ins.ArgIdentifier[2],
+							Surface: 0,
+						}
+					}
+				}
 			}
-
-			vm.Env.Write(pos_, dataPtr, okPtr)
 
 			vm.PC++
 
@@ -281,16 +345,28 @@ func (vm *VM[T]) Run() error {
 				data -> 使用变量来存储将要输出的数据
 			*/
 
-			idx, ok := any(vm.Vars[ins.ArgIdentifier[0]]).(int64)
+			idx, ok := vm.GetInt64Var(ins.ArgIdentifier[0])
 			if !ok {
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
 			}
 			dataPtr, ok := vm.Vars[ins.ArgIdentifier[1]]
 			if !ok {
-				return &ErrPtrNotFound{Name: ins.ArgIdentifier[1]}
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
 			}
 
-			vm.Env.Output(idx, dataPtr)
+			if dataPtr.Kind == Stack {
+				data, ok := vm.GetInt64Var(ins.ArgIdentifier[1])
+				if !ok {
+					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
+				}
+				vm.Env.OutputInt64(idx, data)
+			} else {
+				data, ok := vm.GetBytesVar(ins.ArgIdentifier[1])
+				if !ok {
+					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
+				}
+				vm.Env.OutputBytes(idx, data)
+			}
 
 			vm.PC++
 
@@ -721,15 +797,16 @@ func (vm *VM[T]) Run() error {
 				o0
 			*/
 
+			// 获取要求
 			funName := ins.ArgIdentifier[0]
 			funReq, ok := vm.Env.Funcs[funName]
 			if !ok {
 				return &ErrFuncNotFound{Name: funName}
 			}
 
+			// 检查个数要求
 			inNumStr := ins.ArgIdentifier[1]
 			outNumStr := ins.ArgIdentifier[2]
-
 			inNum, err := vm.getInt64Arg(inNumStr)
 			if err != nil {
 				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("invalid inNum '%s': %v", inNumStr, err)}
@@ -737,7 +814,6 @@ func (vm *VM[T]) Run() error {
 			if inNum != int64(len(funReq.ReqInput)) {
 				return &ErrFuncInputCount{Name: funName, Expected: len(funReq.ReqInput), Got: int(inNum)}
 			}
-
 			outNum, err := vm.getInt64Arg(outNumStr)
 			if err != nil {
 				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("invalid outNum '%s': %v", outNumStr, err)}
@@ -748,15 +824,13 @@ func (vm *VM[T]) Run() error {
 
 			// Build input values and output pointers from argument identifiers
 			argStrs := ins.ArgIdentifier[3:]
-			inputs := make([]T, inNum)
-			outputs := make([]*T, outNum)
+			inputs := make([][]byte, inNum)
 			outputVarNames := make([]string, outNum)
 
 			for idx, argStr := range argStrs {
 				if int64(idx) < inNum {
-					// Input argument: must match ReqInput type and be converted to T
+					// Input argument: must match ReqInput type and be encoded to []byte
 					expectedType := funReq.ReqInput[idx]
-					var val T
 					switch expectedType {
 					case "int64":
 						num, err := vm.getInt64Arg(argStr)
@@ -764,17 +838,16 @@ func (vm *VM[T]) Run() error {
 							// getInt64Arg already returns a structured error; wrap context
 							return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("input %d for '%s': %v", idx, funName, err)}
 						}
-						val = any(num).(T)
+						inputs[idx] = []byte(strconv.FormatInt(num, 10))
 					case "bytes":
 						b, err := vm.getBytesArg(argStr)
 						if err != nil {
 							return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("input %d for '%s': %v", idx, funName, err)}
 						}
-						val = any(b).(T)
+						inputs[idx] = b
 					default:
 						return &ErrUnsupportedInputType{FuncName: funName, InputIndex: idx, InputType: expectedType}
 					}
-					inputs[idx] = val
 				} else {
 					// Output argument: must match ReqOutput type and be a variable name (not literal)
 					outIdx := int64(idx) - inNum
@@ -800,33 +873,32 @@ func (vm *VM[T]) Run() error {
 						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects bytes (heap) but variable '%s' is not heap", outIdx, funName, argStr)}
 					}
 
-					// Get current value as a pointer so the environment can modify it
-					existingVal, ok := vm.GetVar(argStr)
-					if !ok {
-						return &ErrVarNotFound{Name: argStr}
-					}
-					// We'll pass a pointer to the variable's value; after call we write back
-					outputs[outIdx] = &existingVal
+					// Store variable name for later write-back (CallRS now returns values directly)
 					outputVarNames[outIdx] = argStr
 				}
 			}
 
-			// Call the RS function with converted inputs and output pointers
-			if err := vm.Env.CallRS(funName, inputs, outputs); err != nil {
+			// Call the RS function with encoded inputs
+			outs, err := vm.Env.CallRS(funName, inputs)
+			if err != nil {
 				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' failed: %v", funName, err)}
 			}
 
 			// Write back output values to the corresponding VM variables
-			for idx, varName := range outputVarNames {
-				val := *outputs[idx]
-				switch v := any(val).(type) {
-				case int64:
-					ok := vm.UpdateVarBySurfaceInt64(varName, v)
+			for i, varName := range outputVarNames {
+				expectedType := funReq.ReqOutput[i]
+				switch expectedType {
+				case "int64":
+					num, err := strconv.ParseInt(string(outs[i]), 10, 64)
+					if err != nil {
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s': invalid int64: %v", i, funName, err)}
+					}
+					ok := vm.UpdateVarBySurfaceInt64(varName, num)
 					if !ok {
 						return &ErrVarNotFound{Name: varName}
 					}
-				case []byte:
-					ok := vm.UpdateVarBySurfaceBytes(varName, v)
+				case "bytes":
+					ok := vm.UpdateVarBySurfaceBytes(varName, outs[i])
 					if !ok {
 						return &ErrVarNotFound{Name: varName}
 					}
@@ -838,9 +910,11 @@ func (vm *VM[T]) Run() error {
 			vm.PC++
 
 		case OP_CALL_C:
-			// todo
+			// todo 忽略
+			vm.PC++
 		case OP_CALL_CPP:
-			// todo
+			// todo 忽略
+			vm.PC++
 
 		default:
 			return &ErrUnknownOpcode{Opcode: int(ins.Op)}
@@ -849,7 +923,59 @@ func (vm *VM[T]) Run() error {
 	return nil
 }
 
-func (vm *VM[T]) arithmeticPrepare(ins Instruction, opName string) (int64, int64, error) {
+func (vm *VM) irUpdaterInt64(data int64, ins Instruction) error {
+	// 更新 data
+	ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[1], data)
+	if !ok {
+		// 更新 ok 为 false
+		ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
+		if !ok {
+			// 更新 ok 时 false
+			return &ErrUpdateVarBySurfaceInt64{
+				VarName: ins.ArgIdentifier[2],
+				Surface: 0,
+			}
+		}
+	}
+	// 更新 ok 为 true
+	ok = vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 1)
+	if !ok {
+		// 更新 ok 时 false
+		return &ErrUpdateVarBySurfaceInt64{
+			VarName: ins.ArgIdentifier[2],
+			Surface: 1,
+		}
+	}
+	return nil
+}
+
+func (vm *VM) irUpdaterBytes(data []byte, ins Instruction) error {
+	// 更新 data
+	ok := vm.UpdateVarBySurfaceBytes(ins.ArgIdentifier[1], data)
+	if !ok {
+		// 更新 ok 为 false
+		ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
+		if !ok {
+			// 更新 ok 时 false
+			return &ErrUpdateVarBySurfaceInt64{
+				VarName: ins.ArgIdentifier[2],
+				Surface: 0,
+			}
+		}
+	}
+	// 更新 ok 为 true
+	ok = vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 1)
+	if !ok {
+		// 更新 ok 时 false
+		return &ErrUpdateVarBySurfaceInt64{
+			VarName: ins.ArgIdentifier[2],
+			Surface: 1,
+		}
+	}
+	return nil
+}
+
+func (vm *VM) arithmeticPrepare(ins Instruction, opName string) (int64, int64, error) {
 	// 使用 getInt64Arg 提取前两个操作数（只接受变量，拒绝字面量）
 	aNum, err := vm.getInt64Arg(ins.ArgIdentifier[0])
 	if err != nil {
@@ -868,17 +994,14 @@ func (vm *VM[T]) arithmeticPrepare(ins Instruction, opName string) (int64, int64
 		return 0, 0, &ErrArithmetic{Operation: opName, Err: &ErrOperandType{Operation: opName, Detail: fmt.Sprintf("sum var '%s' is int64", ins.ArgIdentifier[2])}}
 	}
 	// 必须是已存在的 int64 变量
-	val, ok := vm.GetVar(ins.ArgIdentifier[2])
+	_, ok := vm.GetInt64Var(ins.ArgIdentifier[2])
 	if !ok {
 		return 0, 0, &ErrArithmetic{Operation: opName, Err: &ErrVarNotFound{Name: ins.ArgIdentifier[2]}}
-	}
-	if _, ok := any(val).(int64); !ok {
-		return 0, 0, &ErrArithmetic{Operation: opName, Err: &ErrOperandType{Operation: opName, Detail: fmt.Sprintf("var '%s' is not int64", ins.ArgIdentifier[2])}}
 	}
 	return aNum, bNum, nil
 }
 
-func (vm *VM[T]) extractBytesForEq(ins Instruction) ([]byte, []byte, error) {
+func (vm *VM) extractBytesForEq(ins Instruction) ([]byte, []byte, error) {
 	// 使用 getBytesArg 提取前两个操作数
 	aBytes, err := vm.getBytesArg(ins.ArgIdentifier[0])
 	if err != nil {
@@ -897,12 +1020,9 @@ func (vm *VM[T]) extractBytesForEq(ins Instruction) ([]byte, []byte, error) {
 		return nil, nil, &ErrArithmetic{Operation: "eq_bytes", Err: &ErrOperandType{Operation: "eq_bytes", Detail: fmt.Sprintf("sum var '%s' is int64", ins.ArgIdentifier[2])}}
 	}
 	// 必须是已存在的 int64 变量
-	val, ok := vm.GetVar(ins.ArgIdentifier[2])
+	_, ok := vm.GetInt64Var(ins.ArgIdentifier[2])
 	if !ok {
 		return nil, nil, &ErrArithmetic{Operation: "eq_bytes", Err: &ErrVarNotFound{Name: ins.ArgIdentifier[2]}}
-	}
-	if _, ok := any(val).(int64); !ok {
-		return nil, nil, &ErrArithmetic{Operation: "eq_bytes", Err: &ErrOperandType{Operation: "eq_bytes", Detail: fmt.Sprintf("var '%s' is not int64", ins.ArgIdentifier[2])}}
 	}
 	return aBytes, bBytes, nil
 }
@@ -910,7 +1030,7 @@ func (vm *VM[T]) extractBytesForEq(ins Instruction) ([]byte, []byte, error) {
 // getInt64Arg 尝试从 identifier 中提取 int64 值。
 // 若 identifier 为 []byte 字面量（'...'），则返回错误；
 // 否则尝试解析为十进制 int64，若失败则从变量中读取。
-func (vm *VM[T]) getInt64Arg(identifier string) (int64, error) {
+func (vm *VM) getInt64Arg(identifier string) (int64, error) {
 	// 检查是否为 []byte 字面量（以单引号包围）
 	if len(identifier) >= 2 && identifier[0] == '\'' && identifier[len(identifier)-1] == '\'' {
 		return 0, &ErrOperandType{Operation: "getInt64Arg", Detail: fmt.Sprintf("var '%s' is []byte", identifier)}
@@ -920,33 +1040,25 @@ func (vm *VM[T]) getInt64Arg(identifier string) (int64, error) {
 		return num, nil
 	}
 	// 从变量中读取
-	val, ok := vm.GetVar(identifier)
+	num, ok := vm.GetInt64Var(identifier)
 	if !ok {
 		return 0, &ErrVarNotFound{Name: identifier}
-	}
-	num, ok := any(val).(int64)
-	if !ok {
-		return 0, &ErrOperandType{Operation: "getInt64Arg", Detail: fmt.Sprintf("var '%s' is not int64", identifier)}
 	}
 	return num, nil
 }
 
 // getBytesArg 尝试从 identifier 中提取 []byte 值。
 // 若 identifier 为 []byte 字面量（'...'），则直接返回其字节表示（包含引号）；
-// 否则从变量中读取并断言为 []byte。
-func (vm *VM[T]) getBytesArg(identifier string) ([]byte, error) {
+// 否则从变量中读取。
+func (vm *VM) getBytesArg(identifier string) ([]byte, error) {
 	// 检查是否为 []byte 字面量
 	if len(identifier) >= 2 && identifier[0] == '\'' && identifier[len(identifier)-1] == '\'' {
 		return []byte(identifier), nil
 	}
 	// 从变量中读取
-	val, ok := vm.GetVar(identifier)
+	b, ok := vm.GetBytesVar(identifier)
 	if !ok {
 		return nil, &ErrVarNotFound{Name: identifier}
-	}
-	b, ok := any(val).([]byte)
-	if !ok {
-		return nil, &ErrOperandType{Operation: "getBytesArg", Detail: fmt.Sprintf("var '%s' is not []byte", identifier)}
 	}
 	return b, nil
 }

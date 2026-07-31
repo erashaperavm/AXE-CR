@@ -1,65 +1,57 @@
 package vm
 
-import "axe-cr/core/config"
+import (
+	"axe-cr/core/bridge"
+	"axe-cr/core/config"
+)
 
-type Environment[T NativeType] struct {
+type Environment struct {
 	// idx -> input slice idx
 	// dataPtr -> ptr need to be written or read
-	Input   func(idx int64, dataPtr Ptr)
-	Output  func(idx int64, dataPtr Ptr)
-	Read    func(dataPosOnChain []byte, dataPtr Ptr, okPtr Ptr)
-	Write   func(dataPosOnChain []byte, dataPtr Ptr, okPtr Ptr)
-	CallC   func(funName string, input []T, output []*T) error
-	CallRS  func(funName string, input []T, output []*T) error
-	CallCpp func(funName string, input []T, output []*T) error
-	Mem     *Memory
-	Funcs   map[string]config.FunctionMeta
+	InputInt64  func(idx int64) int64
+	InputBytes  func(idx int64) []byte
+	OutputInt64 func(idx int64, data int64)
+	OutputBytes func(idx int64, data []byte)
+	ReadInt64   func(dataPosOnChain []byte) (int64, error)
+	ReadBytes   func(dataPosOnChain []byte) ([]byte, error)
+	WriteInt64  func(dataPosOnChain []byte, data int64) error
+	WriteBytes  func(dataPosOnChain []byte, data []byte) error
+	CallC       func(funName string, input [][]byte) ([][]byte, error)
+	CallRS      func(funName string, input [][]byte) ([][]byte, error)
+	CallCpp     func(funName string, input [][]byte) ([][]byte, error)
+	Funcs       map[string]config.FunctionMeta
+	InputTypes  map[int64]string
+	OutputTypes map[int64]string
 }
 
-func newEnvironment[T NativeType]() *Environment[T] {
-	e := &Environment[T]{
-		Mem:   NewMemoryObj(),
-		Funcs: make(map[string]config.FunctionMeta),
+func newEnvironment(inputTypes, outputTypes map[int64]string) *Environment {
+	e := &Environment{
+		InputTypes:  inputTypes,
+		OutputTypes: outputTypes,
 	}
-
-	// Mock: write a default value to memory (stack)
-	e.Input = func(idx int64, dataPtr Ptr) {
-		inputs := []int64{10, 20, 30}
-		val := int64(42)
-		if idx >= 0 && idx < int64(len(inputs)) {
-			val = inputs[idx]
-		}
-		if dataPtr.Kind == Stack {
-			e.Mem.WriteStack(val, dataPtr)
-		}
+	e.InputInt64 = func(idx int64) int64 {
+		return bridge.InputInt64(idx)
 	}
-
-	// Mock: read from memory (stack) and ignore
-	e.Output = func(idx int64, dataPtr Ptr) {
-		if dataPtr.Kind == Stack {
-			e.Mem.ReadStack(dataPtr) // discard
-		}
+	e.InputBytes = func(idx int64) []byte {
+		return bridge.InputBytes(idx)
 	}
-
-	// Mock: write default bytes to memory (heap), set ok to true
-	e.Read = func(dataPosOnChain []byte, dataPtr Ptr, okPtr Ptr) {
-		data := []byte("default read data")
-		if dataPtr.Kind == Heap {
-			e.Mem.WriteHeap(data, dataPtr)
-		}
-		if okPtr.Kind == Stack {
-			e.Mem.WriteStack(1, okPtr)
-		}
+	e.OutputInt64 = func(idx int64, data int64) {
+		bridge.OutputInt64(idx, data)
 	}
-
-	// Mock: read from memory (heap) and ignore, set ok to true
-	e.Write = func(dataPosOnChain []byte, dataPtr Ptr, okPtr Ptr) {
-		if dataPtr.Kind == Heap {
-			e.Mem.ReadHeap(dataPtr) // discard
-		}
-		if okPtr.Kind == Stack {
-			e.Mem.WriteStack(1, okPtr)
-		}
+	e.OutputBytes = func(idx int64, data []byte) {
+		bridge.OutputBytes(idx, data)
+	}
+	e.ReadInt64 = func(dataPosOnChain []byte) (int64, error) {
+		return bridge.ReadInt64(dataPosOnChain)
+	}
+	e.ReadBytes = func(dataPosOnChain []byte) ([]byte, error) {
+		return bridge.ReadBytes(dataPosOnChain)
+	}
+	e.WriteInt64 = func(dataPosOnChain []byte, data int64) error {
+		return bridge.WriteInt64(dataPosOnChain, data)
+	}
+	e.WriteBytes = func(dataPosOnChain []byte, data []byte) error {
+		return bridge.WriteBytes(dataPosOnChain, data)
 	}
 	return e
 }

@@ -63,7 +63,3 @@ type Block struct {
 	BeginPC int64
 	EndPC   int64
 }
-
-type NativeType interface {
-	int64 | []byte
-}

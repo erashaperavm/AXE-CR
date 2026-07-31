@@ -1,8 +1,50 @@
-1. real call rs
-2. maybe real io/rw
-3. trace mode
-4. debug mode
-5. compiler
+done 0. 审查 ai 写的 call rs opcode
+1. real call rs （准备序列化 rs 工具）
+2. trace mode
+3. debug mode
+4. compiler
+5. execute-sce
 6. verify-sce
 7. 定时保存
 8. 证明压缩
+
+```
+
+// tools/gen_input/src/main.rs
+use serde::Serialize;
+use sp1_sdk::{SP1Stdin, SP1StdinType};
+use std::fs;
+
+// 定义与你的 ZK 程序匹配的数据结构
+#[derive(Serialize)]
+struct MyInput {
+    number: u32,
+    text: String,
+    // 添加其他字段...
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. 从命令行参数或配置文件读取数据
+    let args: Vec<String> = std::env::args().collect();
+
+    // 示例数据
+    let input_data = MyInput {
+        number: 42,
+        text: "hello, sp1!".to_string(),
+    };
+
+    // 2. 写入 SP1Stdin
+    let mut stdin = SP1Stdin::new();
+    stdin.write(&input_data);
+    // 如果有多个数据，按顺序写入
+    // stdin.write(&another_data);
+
+    // 3. 序列化并保存
+    let bytes = bincode::serialize(&stdin)?;
+    fs::write("input.bin", bytes)?;
+
+    println!("✅ input.bin 生成成功！");
+    Ok(())
+}
+
+```
