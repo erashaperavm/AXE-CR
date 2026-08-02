@@ -3,26 +3,26 @@ package vm
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"strconv"
+
+	"axe-cr/core/utils"
 )
 
 type VM struct {
-	ExeDir  string
-	WorkDir string
-
 	Code      []Instruction   // 字节码
 	PC        int64           // 第几行了
+	Lines     int64           // 执行命令函数行数
 	Mem       *Memory         // 简单的堆栈模型
+	PreMem    *Memory         // 上一帧的内存状态
 	Vars      map[string]Ptr  // 变量名称 -> 内存地址
+	PreVars   map[string]Ptr  // 上一帧的变量表
 	Blocks    map[int64]Block // 代码标记块
+	PreBlocks map[int64]Block // 上一帧的代码标记块
 	Env       *Environment    // 调用外部函数
 	Debug     bool            // 调试模式
 	TraceMode bool            // 是否启用轨迹
-	Traces    []Trace
-}
-
-type Trace struct {
-	// todo
+	Traces    []TraceStep     // 执行轨迹
 }
 
 // NewVM 创建一个 VM，初始化内存与变量表
@@ -39,111 +39,6 @@ func NewVM(code []Instruction, env *Environment, debug bool, traceMode bool) *VM
 	}
 }
 
-// AllocVar 声明一个变量并分配栈空间，返回指针; size only be needed for heap
-func (vm *VM) AllocVar(name string, memType PtrKind, size int64) Ptr {
-	if _, exists := vm.Vars[name]; !exists {
-		var ptr Ptr
-
-		switch memType {
-		case Stack:
-			ptr = vm.Mem.AllocStack()
-		case Heap:
-			ptr = vm.Mem.AllocHeap(size)
-		default:
-			panic(fmt.Sprintf("unsupported mem type: %v", memType))
-		}
-		vm.Vars[name] = ptr
-		return ptr
-	}
-	return vm.Vars[name] // 已存在则返回原指针
-}
-
-// GetInt64Var 获取 Stack 变量值（int64）
-func (vm *VM) GetInt64Var(name string) (int64, bool) {
-	ptr, ok := vm.Vars[name]
-	if !ok || ptr.Kind != Stack {
-		return 0, false
-	}
-	return vm.Mem.ReadStack(ptr)
-}
-
-// GetBytesVar 获取 Heap 变量值（[]byte）
-func (vm *VM) GetBytesVar(name string) ([]byte, bool) {
-	ptr, ok := vm.Vars[name]
-	if !ok || ptr.Kind != Heap {
-		return nil, false
-	}
-	return vm.Mem.ReadHeap(ptr)
-}
-
-// UpdateVarByIdentifier 设置变量值
-func (vm *VM) UpdateVarByIdentifier(name string, valIdentifier string) bool {
-	targetPtr, ok := vm.Vars[name]
-	if !ok {
-		return false
-	}
-	dataPtr, ok := vm.Vars[valIdentifier]
-	if !ok {
-		return false
-	}
-
-	if targetPtr.Kind != dataPtr.Kind {
-		return false
-	}
-
-	switch dataPtr.Kind {
-	case Stack:
-		data, ok := vm.Mem.ReadStack(dataPtr)
-		if !ok {
-			return false
-		}
-		return vm.Mem.WriteStack(data, targetPtr)
-	case Heap:
-		data, ok := vm.Mem.ReadHeap(dataPtr)
-		if !ok {
-			return false
-		}
-		return vm.Mem.WriteHeap(data, targetPtr)
-	default:
-		panic(fmt.Sprintf("unsupported ptr kind: %v", dataPtr.Kind))
-	}
-}
-
-func (vm *VM) UpdateVarBySurfaceInt64(name string, i int64) bool {
-	ptr, ok := vm.Vars[name]
-	if !ok {
-		return false
-	}
-	if ptr.Kind != Stack {
-		return false
-	}
-
-	return vm.Mem.WriteStack(i, ptr)
-}
-
-func (vm *VM) UpdateVarBySurfaceBytes(name string, data []byte) bool {
-	ptr, ok := vm.Vars[name]
-	if !ok {
-		return false
-	}
-	if ptr.Kind != Heap {
-		return false
-	}
-
-	return vm.Mem.WriteHeap(data, ptr)
-}
-
-// DropVar 删除变量并释放对应的栈/堆内存
-func (vm *VM) DropVar(name string) error {
-	ptr, ok := vm.Vars[name]
-	if !ok {
-		return &ErrVarNotFound{Name: name}
-	}
-	vm.Mem.Free(ptr)
-	delete(vm.Vars, name)
-	return nil
-}
-
 func (vm *VM) Run() error {
 	for vm.PC < int64(len(vm.Code)) {
 		ins := vm.Code[vm.PC]
@@ -153,7 +48,9 @@ func (vm *VM) Run() error {
 		}
 
 		if vm.TraceMode {
-
+			vm.PreMem = vm.Mem.copy()
+			vm.PreVars = vm.copyVars()
+			vm.PreBlocks = vm.copyBlocks()
 		}
 
 		// todo : fmt 和 types 由 compiler 保证
@@ -171,7 +68,7 @@ func (vm *VM) Run() error {
 				ok -> 是否读取成功
 			*/
 
-			pos_, ok := vm.GetBytesVar(ins.ArgIdentifier[0])
+			pos_, ok := vm.getBytesVar(ins.ArgIdentifier[0])
 			if !ok {
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
 			}
@@ -193,7 +90,7 @@ func (vm *VM) Run() error {
 				data, err := vm.Env.ReadInt64(pos_)
 				if err != nil {
 					// 更新 ok 为 false
-					ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
+					ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
 					if !ok {
 						return &ErrUpdateVarBySurfaceInt64{
 							VarName: ins.ArgIdentifier[2],
@@ -213,7 +110,7 @@ func (vm *VM) Run() error {
 				data, err := vm.Env.ReadBytes(pos_)
 				if err != nil {
 					// 更新 ok 为 false
-					ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
+					ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
 					if !ok {
 						return &ErrUpdateVarBySurfaceInt64{
 							VarName: ins.ArgIdentifier[2],
@@ -244,7 +141,7 @@ func (vm *VM) Run() error {
 				data -> 使用变量来存储输入的数据
 			*/
 
-			idx, ok := vm.GetInt64Var(ins.ArgIdentifier[0])
+			idx, ok := vm.getInt64Var(ins.ArgIdentifier[0])
 			if !ok {
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
 			}
@@ -288,7 +185,7 @@ func (vm *VM) Run() error {
 				ok -> 是否写入成功
 			*/
 
-			pos_, ok := vm.GetBytesVar(ins.ArgIdentifier[0])
+			pos_, ok := vm.getBytesVar(ins.ArgIdentifier[0])
 			if !ok {
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
 			}
@@ -299,14 +196,14 @@ func (vm *VM) Run() error {
 			}
 
 			if dataPtr.Kind == Stack {
-				data, ok := vm.GetInt64Var(ins.ArgIdentifier[1])
+				data, ok := vm.getInt64Var(ins.ArgIdentifier[1])
 				if !ok {
 					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
 				}
 				err := vm.Env.WriteInt64(pos_, data)
 				if err != nil {
 					// 更新 ok 为 false
-					ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
+					ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
 					if !ok {
 						return &ErrUpdateVarBySurfaceInt64{
 							VarName: ins.ArgIdentifier[2],
@@ -315,14 +212,14 @@ func (vm *VM) Run() error {
 					}
 				}
 			} else {
-				data, ok := vm.GetBytesVar(ins.ArgIdentifier[1])
+				data, ok := vm.getBytesVar(ins.ArgIdentifier[1])
 				if !ok {
 					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
 				}
 				err := vm.Env.WriteBytes(pos_, data)
 				if err != nil {
 					// 更新 ok 为 false
-					ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
+					ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
 					if !ok {
 						return &ErrUpdateVarBySurfaceInt64{
 							VarName: ins.ArgIdentifier[2],
@@ -345,7 +242,7 @@ func (vm *VM) Run() error {
 				data -> 使用变量来存储将要输出的数据
 			*/
 
-			idx, ok := vm.GetInt64Var(ins.ArgIdentifier[0])
+			idx, ok := vm.getInt64Var(ins.ArgIdentifier[0])
 			if !ok {
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
 			}
@@ -355,13 +252,13 @@ func (vm *VM) Run() error {
 			}
 
 			if dataPtr.Kind == Stack {
-				data, ok := vm.GetInt64Var(ins.ArgIdentifier[1])
+				data, ok := vm.getInt64Var(ins.ArgIdentifier[1])
 				if !ok {
 					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
 				}
 				vm.Env.OutputInt64(idx, data)
 			} else {
-				data, ok := vm.GetBytesVar(ins.ArgIdentifier[1])
+				data, ok := vm.getBytesVar(ins.ArgIdentifier[1])
 				if !ok {
 					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
 				}
@@ -393,7 +290,7 @@ func (vm *VM) Run() error {
 				return &ErrOperandType{Operation: "alloc", Detail: fmt.Sprintf("size '%s' is not int64", ins.ArgIdentifier[2])}
 			}
 
-			vm.AllocVar(varName, PtrKind(memType), size)
+			vm.allocVar(varName, PtrKind(memType), size)
 
 			vm.PC++
 
@@ -435,17 +332,17 @@ func (vm *VM) Run() error {
 
 			switch kind {
 			case surfaceInt64:
-				ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[0], num)
+				ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[0], num)
 				if !ok {
 					return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
 				}
 			case surfaceBytes:
-				ok := vm.UpdateVarBySurfaceBytes(ins.ArgIdentifier[0], byt)
+				ok := vm.updateVarBySurfaceBytes(ins.ArgIdentifier[0], byt)
 				if !ok {
 					return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
 				}
 			case identifier:
-				ok := vm.UpdateVarByIdentifier(ins.ArgIdentifier[0], ins.ArgIdentifier[1])
+				ok := vm.updateVarByIdentifier(ins.ArgIdentifier[0], ins.ArgIdentifier[1])
 				if !ok {
 					return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
 				}
@@ -464,7 +361,7 @@ func (vm *VM) Run() error {
 				varname
 			*/
 
-			err := vm.DropVar(ins.ArgIdentifier[0])
+			err := vm.dropVar(ins.ArgIdentifier[0])
 			if err != nil {
 				return err
 			}
@@ -489,7 +386,7 @@ func (vm *VM) Run() error {
 				return err
 			}
 
-			vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum+bNum)
+			vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum+bNum)
 
 			vm.PC++
 
@@ -511,7 +408,7 @@ func (vm *VM) Run() error {
 				return err
 			}
 
-			vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum-bNum)
+			vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum-bNum)
 
 			vm.PC++
 
@@ -533,7 +430,7 @@ func (vm *VM) Run() error {
 				return err
 			}
 
-			vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum*bNum)
+			vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum*bNum)
 
 			vm.PC++
 
@@ -555,13 +452,13 @@ func (vm *VM) Run() error {
 				return err
 			}
 
-			vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum/bNum)
+			vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum/bNum)
 
 			vm.PC++
 
 		case OP_EQ_INT:
 			/*
-				OP_CMP_INT
+				OP_EQ_INT
 
 				int64
 				int64
@@ -572,7 +469,7 @@ func (vm *VM) Run() error {
 				sum
 			*/
 
-			aNum, bNum, err := vm.arithmeticPrepare(ins, "cmp_int")
+			aNum, bNum, err := vm.arithmeticPrepare(ins, "eq_int")
 			if err != nil {
 				return err
 			}
@@ -585,7 +482,7 @@ func (vm *VM) Run() error {
 				boolean = 0
 			}
 
-			ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
+			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
 			if !ok {
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}
 			}
@@ -618,7 +515,7 @@ func (vm *VM) Run() error {
 				boolean = 0
 			}
 
-			ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
+			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
 			if !ok {
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}
 			}
@@ -650,7 +547,7 @@ func (vm *VM) Run() error {
 				boolean = 0
 			}
 
-			ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
+			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
 			if !ok {
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}
 			}
@@ -786,8 +683,10 @@ func (vm *VM) Run() error {
 				func_name
 				int64
 				int64
-				int64 / []byte
+				int64 / bytes
 				... n 个
+
+				// 必须前面全部是 int64 后面全是 bytes
 
 				funname
 				inNum
@@ -797,14 +696,21 @@ func (vm *VM) Run() error {
 				o0
 			*/
 
-			// 获取要求
+			// ============================================================
+			// Step 1: 获取函数运行要求
+			// ============================================================
 			funName := ins.ArgIdentifier[0]
 			funReq, ok := vm.Env.Funcs[funName]
 			if !ok {
 				return &ErrFuncNotFound{Name: funName}
 			}
 
-			// 检查个数要求
+			// ============================================================
+			// Step 2: 检查输入个数要求，检查输入输出类型要求
+			//         约定：前面全部是 int64，后面全是 bytes
+			// ============================================================
+
+			// 2a. 解析并校验输入/输出个数
 			inNumStr := ins.ArgIdentifier[1]
 			outNumStr := ins.ArgIdentifier[2]
 			inNum, err := vm.getInt64Arg(inNumStr)
@@ -822,86 +728,142 @@ func (vm *VM) Run() error {
 				return &ErrFuncOutputCount{Name: funName, Expected: len(funReq.ReqOutput), Got: int(outNum)}
 			}
 
-			// Build input values and output pointers from argument identifiers
-			argStrs := ins.ArgIdentifier[3:]
-			inputs := make([][]byte, inNum)
-			outputVarNames := make([]string, outNum)
-
-			for idx, argStr := range argStrs {
-				if int64(idx) < inNum {
-					// Input argument: must match ReqInput type and be encoded to []byte
-					expectedType := funReq.ReqInput[idx]
-					switch expectedType {
-					case "int64":
-						num, err := vm.getInt64Arg(argStr)
-						if err != nil {
-							// getInt64Arg already returns a structured error; wrap context
-							return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("input %d for '%s': %v", idx, funName, err)}
-						}
-						inputs[idx] = []byte(strconv.FormatInt(num, 10))
-					case "bytes":
-						b, err := vm.getBytesArg(argStr)
-						if err != nil {
-							return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("input %d for '%s': %v", idx, funName, err)}
-						}
-						inputs[idx] = b
-					default:
-						return &ErrUnsupportedInputType{FuncName: funName, InputIndex: idx, InputType: expectedType}
+			// 2b. 校验 ReqInput 遵循约定：前面全是 int64，后面全是 bytes
+			seenBytes := false
+			for i, t := range funReq.ReqInput {
+				switch t {
+				case "int64":
+					if seenBytes {
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' ReqInput[%d]: int64 must not appear after bytes", funName, i)}
 					}
-				} else {
-					// Output argument: must match ReqOutput type and be a variable name (not literal)
-					outIdx := int64(idx) - inNum
-					expectedType := funReq.ReqOutput[outIdx]
+				case "bytes":
+					seenBytes = true
+				default:
+					return &ErrUnsupportedInputType{FuncName: funName, InputIndex: i, InputType: t}
+				}
+			}
 
-					// Validate that argStr is a variable, not a literal
+			// 2c. 校验 ReqOutput 遵循约定：前面全是 int64，后面全是 bytes
+			seenBytes = false
+			for i, t := range funReq.ReqOutput {
+				switch t {
+				case "int64":
+					if seenBytes {
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' ReqOutput[%d]: int64 must not appear after bytes", funName, i)}
+					}
+				case "bytes":
+					seenBytes = true
+				default:
+					return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' unsupported output type '%s'", funName, t)}
+				}
+			}
+
+			// 2d. 收集输出变量名并校验（必须是已存在的变量，不能是字面值）
+			argStrs := ins.ArgIdentifier[3:]
+			outputVarNames := make([]string, outNum)
+			for idx, argStr := range argStrs {
+				if int64(idx) >= inNum {
+					outIdx := int64(idx) - inNum
+					// 不能是字面值
 					if len(argStr) >= 2 && argStr[0] == '\'' && argStr[len(argStr)-1] == '\'' {
 						return &ErrFuncOutputNotVar{FuncName: funName, OutputIndex: int(outIdx)}
 					}
 					if _, err := strconv.ParseInt(argStr, 10, 64); err == nil {
 						return &ErrFuncOutputNotVar{FuncName: funName, OutputIndex: int(outIdx)}
 					}
-
-					// Check that the variable exists and has the correct type
+					// 变量必须存在且类型匹配
 					ptr, exists := vm.Vars[argStr]
 					if !exists {
 						return &ErrVarNotFound{Name: argStr}
 					}
+					expectedType := funReq.ReqOutput[outIdx]
 					if expectedType == "int64" && ptr.Kind != Stack {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects int64 (stack) but variable '%s' is not stack", outIdx, funName, argStr)}
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects int64 but variable '%s' is not stack", outIdx, funName, argStr)}
 					}
 					if expectedType == "bytes" && ptr.Kind != Heap {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects bytes (heap) but variable '%s' is not heap", outIdx, funName, argStr)}
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects bytes but variable '%s' is not heap", outIdx, funName, argStr)}
 					}
-
-					// Store variable name for later write-back (CallRS now returns values directly)
 					outputVarNames[outIdx] = argStr
 				}
 			}
 
-			// Call the RS function with encoded inputs
-			outs, err := vm.Env.CallRS(funName, inputs)
+			// ============================================================
+			// Step 3: 构建输入并调用函数
+			// ============================================================
+			ints := make([]int64, 0, inNum)
+			rawBytes := make([][]byte, 0, inNum)
+
+			for idx, argStr := range argStrs {
+				if int64(idx) >= inNum {
+					break
+				}
+				switch funReq.ReqInput[idx] {
+				case "int64":
+					num, err := vm.getInt64Arg(argStr)
+					if err != nil {
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("input %d for '%s': %v", idx, funName, err)}
+					}
+					ints = append(ints, num)
+				case "bytes":
+					b, err := vm.getBytesArg(argStr)
+					if err != nil {
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("input %d for '%s': %v", idx, funName, err)}
+					}
+					rawBytes = append(rawBytes, b)
+				}
+			}
+
+			resultFilePath, err := vm.Env.CallRS(funName, ints, rawBytes)
 			if err != nil {
 				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' failed: %v", funName, err)}
 			}
 
-			// Write back output values to the corresponding VM variables
-			for i, varName := range outputVarNames {
+			hexData, err := os.ReadFile(resultFilePath.PvPath)
+			if err != nil {
+				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("read '%s' failed: %v", resultFilePath, err)}
+			}
+
+			res, err := utils.SerializeSP1output(string(hexData))
+			if err != nil {
+				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("parse '%s' failed: %v", resultFilePath, err)}
+			}
+
+			// ============================================================
+			// Step 4: 获取函数输出并解析，写入变量
+			// ============================================================
+			if len(res) != len(outputVarNames) {
+				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' output count mismatch: expected %d, got %d", funName, len(outputVarNames), len(res))}
+			}
+
+			for i, parsed := range res {
+				varName := outputVarNames[i]
 				expectedType := funReq.ReqOutput[i]
+
 				switch expectedType {
 				case "int64":
-					num, err := strconv.ParseInt(string(outs[i]), 10, 64)
-					if err != nil {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s': invalid int64: %v", i, funName, err)}
+					if parsed.Type != utils.TypeInt64 {
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects int64 but got type 0x%02x", i, funName, parsed.Type)}
 					}
-					ok := vm.UpdateVarBySurfaceInt64(varName, num)
+					num, ok := parsed.Val.(int64)
 					if !ok {
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s': value is not int64", i, funName)}
+					}
+					if ok := vm.updateVarBySurfaceInt64(varName, num); !ok {
 						return &ErrVarNotFound{Name: varName}
 					}
+
 				case "bytes":
-					ok := vm.UpdateVarBySurfaceBytes(varName, outs[i])
+					if parsed.Type != utils.TypeBytes {
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects bytes but got type 0x%02x", i, funName, parsed.Type)}
+					}
+					data, ok := parsed.Val.([]byte)
 					if !ok {
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s': value is not []byte", i, funName)}
+					}
+					if ok := vm.updateVarBySurfaceBytes(varName, data); !ok {
 						return &ErrVarNotFound{Name: varName}
 					}
+
 				default:
 					return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("unsupported output type for variable '%s'", varName)}
 				}
@@ -919,16 +881,129 @@ func (vm *VM) Run() error {
 		default:
 			return &ErrUnknownOpcode{Opcode: int(ins.Op)}
 		}
+
+		if vm.TraceMode {
+			// generate trace step
+			traceStep := vm.Mem.getDiff(vm.PreMem)
+			traceStep.VarsChanges = vm.getVarsDiff()
+			traceStep.BlocksChanges = vm.getBlocksDiff()
+			vm.Traces = append(vm.Traces, traceStep)
+		}
 	}
+	return nil
+}
+
+// allocVar 声明一个变量并分配栈空间，返回指针; size only be needed for heap
+func (vm *VM) allocVar(name string, memType PtrKind, size int64) Ptr {
+	if _, exists := vm.Vars[name]; !exists {
+		var ptr Ptr
+
+		switch memType {
+		case Stack:
+			ptr = vm.Mem.allocStack()
+		case Heap:
+			ptr = vm.Mem.allocHeap(size)
+		default:
+			panic(fmt.Sprintf("unsupported mem type: %v", memType))
+		}
+		vm.Vars[name] = ptr
+		return ptr
+	}
+	return vm.Vars[name] // 已存在则返回原指针
+}
+
+// getInt64Var 获取 Stack 变量值（int64）
+func (vm *VM) getInt64Var(name string) (int64, bool) {
+	ptr, ok := vm.Vars[name]
+	if !ok || ptr.Kind != Stack {
+		return 0, false
+	}
+	return vm.Mem.readStack(ptr)
+}
+
+// getBytesVar 获取 Heap 变量值（[]byte）
+func (vm *VM) getBytesVar(name string) ([]byte, bool) {
+	ptr, ok := vm.Vars[name]
+	if !ok || ptr.Kind != Heap {
+		return nil, false
+	}
+	return vm.Mem.readHeap(ptr)
+}
+
+// updateVarByIdentifier 设置变量值
+func (vm *VM) updateVarByIdentifier(name string, valIdentifier string) bool {
+	targetPtr, ok := vm.Vars[name]
+	if !ok {
+		return false
+	}
+	dataPtr, ok := vm.Vars[valIdentifier]
+	if !ok {
+		return false
+	}
+
+	if targetPtr.Kind != dataPtr.Kind {
+		return false
+	}
+
+	switch dataPtr.Kind {
+	case Stack:
+		data, ok := vm.Mem.readStack(dataPtr)
+		if !ok {
+			return false
+		}
+		return vm.Mem.writeStack(data, targetPtr)
+	case Heap:
+		data, ok := vm.Mem.readHeap(dataPtr)
+		if !ok {
+			return false
+		}
+		return vm.Mem.writeHeap(data, targetPtr)
+	default:
+		panic(fmt.Sprintf("unsupported ptr kind: %v", dataPtr.Kind))
+	}
+}
+
+func (vm *VM) updateVarBySurfaceInt64(name string, i int64) bool {
+	ptr, ok := vm.Vars[name]
+	if !ok {
+		return false
+	}
+	if ptr.Kind != Stack {
+		return false
+	}
+
+	return vm.Mem.writeStack(i, ptr)
+}
+
+func (vm *VM) updateVarBySurfaceBytes(name string, data []byte) bool {
+	ptr, ok := vm.Vars[name]
+	if !ok {
+		return false
+	}
+	if ptr.Kind != Heap {
+		return false
+	}
+
+	return vm.Mem.writeHeap(data, ptr)
+}
+
+// dropVar 删除变量并释放对应的栈/堆内存
+func (vm *VM) dropVar(name string) error {
+	ptr, ok := vm.Vars[name]
+	if !ok {
+		return &ErrVarNotFound{Name: name}
+	}
+	vm.Mem.free(ptr)
+	delete(vm.Vars, name)
 	return nil
 }
 
 func (vm *VM) irUpdaterInt64(data int64, ins Instruction) error {
 	// 更新 data
-	ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[1], data)
+	ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[1], data)
 	if !ok {
 		// 更新 ok 为 false
-		ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
+		ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
 		if !ok {
 			// 更新 ok 时 false
 			return &ErrUpdateVarBySurfaceInt64{
@@ -938,7 +1013,7 @@ func (vm *VM) irUpdaterInt64(data int64, ins Instruction) error {
 		}
 	}
 	// 更新 ok 为 true
-	ok = vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 1)
+	ok = vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 1)
 	if !ok {
 		// 更新 ok 时 false
 		return &ErrUpdateVarBySurfaceInt64{
@@ -951,10 +1026,10 @@ func (vm *VM) irUpdaterInt64(data int64, ins Instruction) error {
 
 func (vm *VM) irUpdaterBytes(data []byte, ins Instruction) error {
 	// 更新 data
-	ok := vm.UpdateVarBySurfaceBytes(ins.ArgIdentifier[1], data)
+	ok := vm.updateVarBySurfaceBytes(ins.ArgIdentifier[1], data)
 	if !ok {
 		// 更新 ok 为 false
-		ok := vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
+		ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
 		if !ok {
 			// 更新 ok 时 false
 			return &ErrUpdateVarBySurfaceInt64{
@@ -964,7 +1039,7 @@ func (vm *VM) irUpdaterBytes(data []byte, ins Instruction) error {
 		}
 	}
 	// 更新 ok 为 true
-	ok = vm.UpdateVarBySurfaceInt64(ins.ArgIdentifier[2], 1)
+	ok = vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 1)
 	if !ok {
 		// 更新 ok 时 false
 		return &ErrUpdateVarBySurfaceInt64{
@@ -994,7 +1069,7 @@ func (vm *VM) arithmeticPrepare(ins Instruction, opName string) (int64, int64, e
 		return 0, 0, &ErrArithmetic{Operation: opName, Err: &ErrOperandType{Operation: opName, Detail: fmt.Sprintf("sum var '%s' is int64", ins.ArgIdentifier[2])}}
 	}
 	// 必须是已存在的 int64 变量
-	_, ok := vm.GetInt64Var(ins.ArgIdentifier[2])
+	_, ok := vm.getInt64Var(ins.ArgIdentifier[2])
 	if !ok {
 		return 0, 0, &ErrArithmetic{Operation: opName, Err: &ErrVarNotFound{Name: ins.ArgIdentifier[2]}}
 	}
@@ -1020,7 +1095,7 @@ func (vm *VM) extractBytesForEq(ins Instruction) ([]byte, []byte, error) {
 		return nil, nil, &ErrArithmetic{Operation: "eq_bytes", Err: &ErrOperandType{Operation: "eq_bytes", Detail: fmt.Sprintf("sum var '%s' is int64", ins.ArgIdentifier[2])}}
 	}
 	// 必须是已存在的 int64 变量
-	_, ok := vm.GetInt64Var(ins.ArgIdentifier[2])
+	_, ok := vm.getInt64Var(ins.ArgIdentifier[2])
 	if !ok {
 		return nil, nil, &ErrArithmetic{Operation: "eq_bytes", Err: &ErrVarNotFound{Name: ins.ArgIdentifier[2]}}
 	}
@@ -1040,7 +1115,7 @@ func (vm *VM) getInt64Arg(identifier string) (int64, error) {
 		return num, nil
 	}
 	// 从变量中读取
-	num, ok := vm.GetInt64Var(identifier)
+	num, ok := vm.getInt64Var(identifier)
 	if !ok {
 		return 0, &ErrVarNotFound{Name: identifier}
 	}
@@ -1056,9 +1131,67 @@ func (vm *VM) getBytesArg(identifier string) ([]byte, error) {
 		return []byte(identifier), nil
 	}
 	// 从变量中读取
-	b, ok := vm.GetBytesVar(identifier)
+	b, ok := vm.getBytesVar(identifier)
 	if !ok {
 		return nil, &ErrVarNotFound{Name: identifier}
 	}
 	return b, nil
+}
+
+func (vm *VM) getVarsDiff() []VarsDiff {
+	var diff []VarsDiff
+	for name, addr := range vm.Vars {
+		if addr != vm.PreVars[name] {
+			diff = append(diff, VarsDiff{
+				Name: name,
+				Pre:  vm.PreVars[name],
+				Now:  addr,
+			})
+			continue
+		}
+	}
+	return diff
+}
+
+func (vm *VM) applyVarsDiff(diff []VarsDiff) {
+	for _, d := range diff {
+		vm.Vars[d.Name] = d.Now
+	}
+}
+
+func (vm *VM) copyVars() map[string]Ptr {
+	var newVars map[string]Ptr
+	for name, addr := range vm.Vars {
+		newVars[name] = addr
+	}
+	return newVars
+}
+
+func (vm *VM) getBlocksDiff() []BlocksDiff {
+	var diff []BlocksDiff
+	for label, block := range vm.Blocks {
+		if block != vm.PreBlocks[label] {
+			diff = append(diff, BlocksDiff{
+				Label: label,
+				Pre:   vm.PreBlocks[label],
+				Now:   block,
+			})
+			continue
+		}
+	}
+	return diff
+}
+
+func (vm *VM) applyBlocksDiff(diff []BlocksDiff) {
+	for _, d := range diff {
+		vm.Blocks[d.Label] = d.Now
+	}
+}
+
+func (vm *VM) copyBlocks() map[int64]Block {
+	var newBlocks map[int64]Block
+	for label, block := range vm.Blocks {
+		newBlocks[label] = block
+	}
+	return newBlocks
 }

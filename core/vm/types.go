@@ -63,3 +63,34 @@ type Block struct {
 	BeginPC int64
 	EndPC   int64
 }
+
+type StackDiff struct {
+	Addr int64 // 栈地址
+	Pre  int64 // 变化前的值
+	Now  int64 // 变化后的值
+}
+
+type HeapDiff struct {
+	Addr int64  // 堆地址
+	Pre  []byte // 变化前的数据
+	Now  []byte // 变化后的数据
+}
+
+type TraceStep struct {
+	StackChanges  []StackDiff
+	HeapChanges   []HeapDiff
+	VarsChanges   []VarsDiff
+	BlocksChanges []BlocksDiff
+}
+
+type VarsDiff struct {
+	Name string
+	Pre  Ptr
+	Now  Ptr
+}
+
+type BlocksDiff struct {
+	Label int64
+	Pre   Block
+	Now   Block
+}
