@@ -94,3 +94,8 @@ type BlocksDiff struct {
 	Pre   Block
 	Now   Block
 }
+
+type TokenPos struct {
+	Line int64
+	Col  int64
+}

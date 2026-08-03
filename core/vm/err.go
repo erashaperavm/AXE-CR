@@ -14,6 +14,10 @@ type ErrPtrNotFound struct{ Name string }
 
 func (e *ErrPtrNotFound) Error() string { return fmt.Sprintf("ptr '%s' not found", e.Name) }
 
+type ErrVarDrop struct{ Name string }
+
+func (e *ErrVarDrop) Error() string { return fmt.Sprintf("variable '%s' dropped failed", e.Name) }
+
 // ErrTypeMismatch indicates a type mismatch.
 type ErrTypeMismatch struct {
 	Expected string

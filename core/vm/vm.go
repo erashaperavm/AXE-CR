@@ -1,45 +1,51 @@
 package vm
 
 import (
+	"axe-cr/core/utils"
 	"bytes"
 	"fmt"
 	"os"
 	"strconv"
-
-	"axe-cr/core/utils"
 )
 
 type VM struct {
-	Code      []Instruction   // 字节码
-	PC        int64           // 第几行了
-	Lines     int64           // 执行命令函数行数
-	Mem       *Memory         // 简单的堆栈模型
-	PreMem    *Memory         // 上一帧的内存状态
-	Vars      map[string]Ptr  // 变量名称 -> 内存地址
-	PreVars   map[string]Ptr  // 上一帧的变量表
-	Blocks    map[int64]Block // 代码标记块
-	PreBlocks map[int64]Block // 上一帧的代码标记块
-	Env       *Environment    // 调用外部函数
-	Debug     bool            // 调试模式
-	TraceMode bool            // 是否启用轨迹
-	Traces    []TraceStep     // 执行轨迹
+	Code      []Instruction                // 字节码
+	PC        int64                        // 第几行了
+	Lines     int64                        // 真实执行命令函数行数
+	Mem       *Memory                      // 简单的堆栈模型
+	PreMem    *Memory                      // 上一帧的内存状态
+	Vars      map[string]Ptr               // 变量名称 -> 内存地址
+	PreVars   map[string]Ptr               // 上一帧的变量表
+	Blocks    map[int64]Block              // 代码标记块
+	PreBlocks map[int64]Block              // 上一帧的代码标记块
+	Env       *Environment                 // 调用外部函数
+	Debug     bool                         // 调试模式
+	TraceMode bool                         // 是否启用轨迹
+	Traces    map[int64]TraceStep          // 执行轨迹, vm.Traces[vm.Lines]
+	OriginPos map[int64]map[int64]TokenPos // 原始位置，与 Code 里面的每一个 string Token 一一对应
 }
 
-// NewVM 创建一个 VM，初始化内存与变量表
-func NewVM(code []Instruction, env *Environment, debug bool, traceMode bool) *VM {
+// NewExecuteVM 创建一个 VM，初始化内存与变量表
+func NewExecuteVM(code []Instruction, env *Environment, debug bool, traceMode bool) *VM {
 	return &VM{
 		Code:      code,
 		PC:        0,
+		Lines:     0,
 		Mem:       NewMemoryObj(),
+		PreMem:    NewMemoryObj(),
 		Vars:      make(map[string]Ptr),
+		PreVars:   make(map[string]Ptr),
 		Blocks:    make(map[int64]Block),
+		PreBlocks: make(map[int64]Block),
 		Env:       env,
 		Debug:     debug,
 		TraceMode: traceMode,
+		Traces:    make(map[int64]TraceStep),
+		OriginPos: make(map[int64]map[int64]TokenPos),
 	}
 }
 
-func (vm *VM) Run() error {
+func (vm *VM) Run() (error, []TokenPos) {
 	for vm.PC < int64(len(vm.Code)) {
 		ins := vm.Code[vm.PC]
 
@@ -70,20 +76,24 @@ func (vm *VM) Run() error {
 
 			pos_, ok := vm.getBytesVar(ins.ArgIdentifier[0])
 			if !ok {
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
+				sourcePos := vm.OriginPos[vm.PC][4]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
 			}
 
 			dataPtr, ok := vm.Vars[ins.ArgIdentifier[1]]
 			if !ok {
-				return &ErrPtrNotFound{Name: ins.ArgIdentifier[1]}
+				sourcePos := vm.OriginPos[vm.PC][5]
+				return &ErrPtrNotFound{Name: ins.ArgIdentifier[1]}, []TokenPos{sourcePos}
 			}
 
 			okPtr, ok := vm.Vars[ins.ArgIdentifier[2]]
 			if !ok {
-				return &ErrPtrNotFound{Name: ins.ArgIdentifier[2]}
+				sourcePos := vm.OriginPos[vm.PC][6]
+				return &ErrPtrNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePos}
 			}
 			if okPtr.Kind != Stack {
-				return &ErrTypeMismatch{Expected: "int64", Got: "bytes"}
+				sourcePos := vm.OriginPos[vm.PC][6]
+				return &ErrTypeMismatch{Expected: "int64", Got: "bytes"}, []TokenPos{sourcePos}
 			}
 
 			if dataPtr.Kind == Stack {
@@ -92,19 +102,21 @@ func (vm *VM) Run() error {
 					// 更新 ok 为 false
 					ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
 					if !ok {
+						sourcePos := vm.OriginPos[vm.PC][5]
 						return &ErrUpdateVarBySurfaceInt64{
 							VarName: ins.ArgIdentifier[2],
 							Surface: 0,
-						}
+						}, []TokenPos{sourcePos}
 					}
 				}
 
 				err = vm.irUpdaterInt64(data, ins)
 				if err != nil {
+					sourcePos := vm.OriginPos[vm.PC][5]
 					return &ErrRead{
 						Pos: pos_,
 						Err: err,
-					}
+					}, []TokenPos{sourcePos}
 				}
 			} else {
 				data, err := vm.Env.ReadBytes(pos_)
@@ -112,23 +124,26 @@ func (vm *VM) Run() error {
 					// 更新 ok 为 false
 					ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
 					if !ok {
+						sourcePos := vm.OriginPos[vm.PC][5]
 						return &ErrUpdateVarBySurfaceInt64{
 							VarName: ins.ArgIdentifier[2],
 							Surface: 0,
-						}
+						}, []TokenPos{sourcePos}
 					}
 				}
 
 				err = vm.irUpdaterBytes(data, ins)
 				if err != nil {
+					sourcePos := vm.OriginPos[vm.PC][5]
 					return &ErrRead{
 						Pos: pos_,
 						Err: err,
-					}
+					}, []TokenPos{sourcePos}
 				}
 			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_INPUT:
 			/*
@@ -143,34 +158,39 @@ func (vm *VM) Run() error {
 
 			idx, ok := vm.getInt64Var(ins.ArgIdentifier[0])
 			if !ok {
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
+				sourcePos := vm.OriginPos[vm.PC][3]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
 			}
 			dataPtr, ok := vm.Vars[ins.ArgIdentifier[1]]
 			if !ok {
-				return &ErrPtrNotFound{Name: ins.ArgIdentifier[1]}
+				sourcePos := vm.OriginPos[vm.PC][4]
+				return &ErrPtrNotFound{Name: ins.ArgIdentifier[1]}, []TokenPos{sourcePos}
 			}
 
 			if dataPtr.Kind == Stack {
 				data := vm.Env.InputInt64(idx)
 				err := vm.irUpdaterInt64(data, ins)
 				if err != nil {
+					sourcePos := vm.OriginPos[vm.PC][4]
 					return &InputErr{
 						Index: idx,
 						Err:   err,
-					}
+					}, []TokenPos{sourcePos}
 				}
 			} else {
 				data := vm.Env.InputBytes(idx)
 				err := vm.irUpdaterBytes(data, ins)
 				if err != nil {
+					sourcePos := vm.OriginPos[vm.PC][4]
 					return &InputErr{
 						Index: idx,
 						Err:   err,
-					}
+					}, []TokenPos{sourcePos}
 				}
 			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_WRITE:
 			/*
@@ -187,49 +207,56 @@ func (vm *VM) Run() error {
 
 			pos_, ok := vm.getBytesVar(ins.ArgIdentifier[0])
 			if !ok {
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
+				sourcePos := vm.OriginPos[vm.PC][4]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
 			}
 
 			dataPtr, ok := vm.Vars[ins.ArgIdentifier[1]]
 			if !ok {
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
+				sourcePos := vm.OriginPos[vm.PC][5]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}, []TokenPos{sourcePos}
 			}
 
 			if dataPtr.Kind == Stack {
 				data, ok := vm.getInt64Var(ins.ArgIdentifier[1])
 				if !ok {
-					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
+					sourcePos := vm.OriginPos[vm.PC][5]
+					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}, []TokenPos{sourcePos}
 				}
 				err := vm.Env.WriteInt64(pos_, data)
 				if err != nil {
 					// 更新 ok 为 false
 					ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
 					if !ok {
+						sourcePos := vm.OriginPos[vm.PC][5]
 						return &ErrUpdateVarBySurfaceInt64{
 							VarName: ins.ArgIdentifier[2],
 							Surface: 0,
-						}
+						}, []TokenPos{sourcePos}
 					}
 				}
 			} else {
 				data, ok := vm.getBytesVar(ins.ArgIdentifier[1])
 				if !ok {
-					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
+					sourcePos := vm.OriginPos[vm.PC][5]
+					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}, []TokenPos{sourcePos}
 				}
 				err := vm.Env.WriteBytes(pos_, data)
 				if err != nil {
 					// 更新 ok 为 false
 					ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
 					if !ok {
+						sourcePos := vm.OriginPos[vm.PC][5]
 						return &ErrUpdateVarBySurfaceInt64{
 							VarName: ins.ArgIdentifier[2],
 							Surface: 0,
-						}
+						}, []TokenPos{sourcePos}
 					}
 				}
 			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_OUTPUT:
 			/*
@@ -244,28 +271,33 @@ func (vm *VM) Run() error {
 
 			idx, ok := vm.getInt64Var(ins.ArgIdentifier[0])
 			if !ok {
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
+				sourcePos := vm.OriginPos[vm.PC][3]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
 			}
 			dataPtr, ok := vm.Vars[ins.ArgIdentifier[1]]
 			if !ok {
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
+				sourcePos := vm.OriginPos[vm.PC][4]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}, []TokenPos{sourcePos}
 			}
 
 			if dataPtr.Kind == Stack {
 				data, ok := vm.getInt64Var(ins.ArgIdentifier[1])
 				if !ok {
-					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
+					sourcePos := vm.OriginPos[vm.PC][4]
+					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}, []TokenPos{sourcePos}
 				}
 				vm.Env.OutputInt64(idx, data)
 			} else {
 				data, ok := vm.getBytesVar(ins.ArgIdentifier[1])
 				if !ok {
-					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}
+					sourcePos := vm.OriginPos[vm.PC][4]
+					return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}, []TokenPos{sourcePos}
 				}
 				vm.Env.OutputBytes(idx, data)
 			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_ALLOC:
 			/*
@@ -283,16 +315,19 @@ func (vm *VM) Run() error {
 			varName := ins.ArgIdentifier[0]
 			memType, err := strconv.ParseInt(ins.ArgIdentifier[1], 10, 64)
 			if err != nil {
-				return &ErrOperandType{Operation: "alloc", Detail: fmt.Sprintf("memType '%s' is not int64", ins.ArgIdentifier[1])}
+				sourcePos := vm.OriginPos[vm.PC][5]
+				return &ErrOperandType{Operation: "alloc", Detail: fmt.Sprintf("memType '%s' is not int64", ins.ArgIdentifier[1])}, []TokenPos{sourcePos}
 			}
 			size, err := strconv.ParseInt(ins.ArgIdentifier[2], 10, 64)
 			if err != nil {
-				return &ErrOperandType{Operation: "alloc", Detail: fmt.Sprintf("size '%s' is not int64", ins.ArgIdentifier[2])}
+				sourcePos := vm.OriginPos[vm.PC][6]
+				return &ErrOperandType{Operation: "alloc", Detail: fmt.Sprintf("size '%s' is not int64", ins.ArgIdentifier[2])}, []TokenPos{sourcePos}
 			}
 
 			vm.allocVar(varName, PtrKind(memType), size)
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_UPDATE:
 			/*
@@ -334,23 +369,28 @@ func (vm *VM) Run() error {
 			case surfaceInt64:
 				ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[0], num)
 				if !ok {
-					return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
+					sourcePos := vm.OriginPos[vm.PC][3]
+					return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
 				}
 			case surfaceBytes:
 				ok := vm.updateVarBySurfaceBytes(ins.ArgIdentifier[0], byt)
 				if !ok {
-					return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
+					sourcePos := vm.OriginPos[vm.PC][3]
+					return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
 				}
 			case identifier:
 				ok := vm.updateVarByIdentifier(ins.ArgIdentifier[0], ins.ArgIdentifier[1])
 				if !ok {
-					return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
+					sourcePos := vm.OriginPos[vm.PC][3]
+					return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
 				}
 			default:
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}
+				sourcePos := vm.OriginPos[vm.PC][3]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
 			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_DROP:
 			/*
@@ -363,10 +403,12 @@ func (vm *VM) Run() error {
 
 			err := vm.dropVar(ins.ArgIdentifier[0])
 			if err != nil {
-				return err
+				sourcePos := vm.OriginPos[vm.PC][2]
+				return &ErrVarDrop{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
 			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_ADD:
 			/*
@@ -383,12 +425,22 @@ func (vm *VM) Run() error {
 
 			aNum, bNum, err := vm.arithmeticPrepare(ins, "add")
 			if err != nil {
-				return err
+				sourcePosA := vm.OriginPos[vm.PC][4]
+				sourcePosB := vm.OriginPos[vm.PC][5]
+				return &ErrArithmetic{
+					Operation: "add",
+					Err:       err,
+				}, []TokenPos{sourcePosA, sourcePosB}
 			}
 
-			vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum+bNum)
+			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum+bNum)
+			if !ok {
+				sourcePosSum := vm.OriginPos[vm.PC][6]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSum}
+			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_SUB:
 			/*
@@ -405,12 +457,22 @@ func (vm *VM) Run() error {
 
 			aNum, bNum, err := vm.arithmeticPrepare(ins, "sub")
 			if err != nil {
-				return err
+				sourcePosA := vm.OriginPos[vm.PC][4]
+				sourcePosB := vm.OriginPos[vm.PC][5]
+				return &ErrArithmetic{
+					Operation: "sub",
+					Err:       err,
+				}, []TokenPos{sourcePosA, sourcePosB}
 			}
 
-			vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum-bNum)
+			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum-bNum)
+			if !ok {
+				sourcePosSub := vm.OriginPos[vm.PC][6]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSub}
+			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_MUL:
 			/*
@@ -427,12 +489,22 @@ func (vm *VM) Run() error {
 
 			aNum, bNum, err := vm.arithmeticPrepare(ins, "mul")
 			if err != nil {
-				return err
+				sourcePosA := vm.OriginPos[vm.PC][4]
+				sourcePosB := vm.OriginPos[vm.PC][5]
+				return &ErrArithmetic{
+					Operation: "mul",
+					Err:       err,
+				}, []TokenPos{sourcePosA, sourcePosB}
 			}
 
-			vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum*bNum)
+			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum*bNum)
+			if !ok {
+				sourcePosProduct := vm.OriginPos[vm.PC][6]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosProduct}
+			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_DIV:
 			/*
@@ -449,12 +521,22 @@ func (vm *VM) Run() error {
 
 			aNum, bNum, err := vm.arithmeticPrepare(ins, "div")
 			if err != nil {
-				return err
+				sourcePosA := vm.OriginPos[vm.PC][4]
+				sourcePosB := vm.OriginPos[vm.PC][5]
+				return &ErrArithmetic{
+					Operation: "div",
+					Err:       err,
+				}, []TokenPos{sourcePosA, sourcePosB}
 			}
 
-			vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum/bNum)
+			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum/bNum)
+			if !ok {
+				sourcePosDiv := vm.OriginPos[vm.PC][6]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosDiv}
+			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_EQ_INT:
 			/*
@@ -471,7 +553,12 @@ func (vm *VM) Run() error {
 
 			aNum, bNum, err := vm.arithmeticPrepare(ins, "eq_int")
 			if err != nil {
-				return err
+				sourcePosA := vm.OriginPos[vm.PC][4]
+				sourcePosB := vm.OriginPos[vm.PC][5]
+				return &ErrArithmetic{
+					Operation: "eq_int",
+					Err:       err,
+				}, []TokenPos{sourcePosA, sourcePosB}
 			}
 
 			var boolean int64
@@ -484,10 +571,12 @@ func (vm *VM) Run() error {
 
 			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
 			if !ok {
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}
+				sourcePosSum := vm.OriginPos[vm.PC][6]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSum}
 			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_EQ_BYTES:
 			/*
@@ -504,7 +593,12 @@ func (vm *VM) Run() error {
 
 			aBytes, bBytes, err := vm.extractBytesForEq(ins)
 			if err != nil {
-				return err
+				sourcePosA := vm.OriginPos[vm.PC][4]
+				sourcePosB := vm.OriginPos[vm.PC][5]
+				return &ErrArithmetic{
+					Operation: "eq_bytes",
+					Err:       err,
+				}, []TokenPos{sourcePosA, sourcePosB}
 			}
 
 			var boolean int64
@@ -517,10 +611,12 @@ func (vm *VM) Run() error {
 
 			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
 			if !ok {
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}
+				sourcePosSum := vm.OriginPos[vm.PC][6]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSum}
 			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_LARGE_INT:
 			/*
@@ -537,7 +633,12 @@ func (vm *VM) Run() error {
 
 			aNum, bNum, err := vm.arithmeticPrepare(ins, "large_int")
 			if err != nil {
-				return err // arithmeticPrepare already returns *ErrArithmetic
+				sourcePosA := vm.OriginPos[vm.PC][4]
+				sourcePosB := vm.OriginPos[vm.PC][5]
+				return &ErrArithmetic{
+					Operation: "large_int",
+					Err:       err,
+				}, []TokenPos{sourcePosA, sourcePosB}
 			}
 
 			var boolean int64
@@ -549,10 +650,12 @@ func (vm *VM) Run() error {
 
 			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
 			if !ok {
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}
+				sourcePosSum := vm.OriginPos[vm.PC][6]
+				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSum}
 			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_JMP:
 			/*
@@ -565,18 +668,23 @@ func (vm *VM) Run() error {
 			labelStr := ins.ArgIdentifier[0]
 			label, err := strconv.ParseInt(labelStr, 10, 64)
 			if err != nil {
-				return &ErrBlockLabelInvalid{Label: labelStr, Reason: "not a valid integer"}
+				sourcePosJmp := vm.OriginPos[vm.PC][2]
+				return &ErrBlockLabelInvalid{Label: labelStr, Reason: "not a valid integer"}, []TokenPos{sourcePosJmp}
 			}
 
 			tgtBlock, ok := vm.Blocks[label]
 			if !ok {
-				return &ErrLabelNotFound{Label: labelStr}
+				sourcePosJmp := vm.OriginPos[vm.PC][2]
+				return &ErrLabelNotFound{Label: labelStr}, []TokenPos{sourcePosJmp}
 			}
 			eptBlock := Block{}
 			if tgtBlock == eptBlock {
-				return &ErrLabelEmpty{Label: labelStr}
+				sourcePosJmp := vm.OriginPos[vm.PC][2]
+				return &ErrLabelEmpty{Label: labelStr}, []TokenPos{sourcePosJmp}
 			}
+
 			vm.PC = tgtBlock.BeginPC
+			vm.Lines++
 
 		case OP_IF:
 			/*
@@ -586,36 +694,45 @@ func (vm *VM) Run() error {
 				label (int64)
 
 				condition
+				label
 			*/
 
 			conditionStr := ins.ArgIdentifier[0]
 			condition, err := strconv.ParseInt(conditionStr, 10, 64)
 			if err != nil {
-				return &ErrOperandType{Operation: "if", Detail: fmt.Sprintf("condition '%s' not a valid int64: %v", conditionStr, err)}
+				sourcePosIf := vm.OriginPos[vm.PC][3]
+				return &ErrOperandType{Operation: "if", Detail: fmt.Sprintf("condition '%s' not a valid int64: %v", conditionStr, err)}, []TokenPos{sourcePosIf}
 			}
 
 			switch condition {
 			case 0:
 				// false, 跳过 label
 				vm.PC++
+				vm.Lines++
 			case 1:
 				// true, jmp to label block
 				labelStr := ins.ArgIdentifier[1]
 				label, err := strconv.ParseInt(labelStr, 10, 64)
 				if err != nil {
-					return &ErrBlockLabelInvalid{Label: labelStr, Reason: "not a valid integer"}
+					sourcePosIf := vm.OriginPos[vm.PC][4]
+					return &ErrBlockLabelInvalid{Label: labelStr, Reason: "not a valid integer"}, []TokenPos{sourcePosIf}
 				}
 				tgtBlock, ok := vm.Blocks[label]
 				if !ok {
-					return &ErrLabelNotFound{Label: labelStr}
+					sourcePosIf := vm.OriginPos[vm.PC][4]
+					return &ErrLabelNotFound{Label: labelStr}, []TokenPos{sourcePosIf}
 				}
 				eptBlock := Block{}
 				if tgtBlock == eptBlock {
-					return &ErrLabelEmpty{Label: labelStr}
+					sourcePosIf := vm.OriginPos[vm.PC][4]
+					return &ErrLabelEmpty{Label: labelStr}, []TokenPos{sourcePosIf}
 				}
+
 				vm.PC = tgtBlock.BeginPC
+				vm.Lines++
 			default:
-				return &ErrOperandType{Operation: "if", Detail: fmt.Sprintf("condition '%s' is illegal: must be 0 or 1", conditionStr)}
+				sourcePosIf := vm.OriginPos[vm.PC][3]
+				return &ErrOperandType{Operation: "if", Detail: fmt.Sprintf("condition '%s' is illegal: must be 0 or 1", conditionStr)}, []TokenPos{sourcePosIf}
 			}
 
 		case OP_BEGIN:
@@ -652,7 +769,8 @@ func (vm *VM) Run() error {
 
 			if !isEndExists {
 				// do not found end
-				return &ErrBlockNotClosed{Label: label}
+				sourcePosBegin := vm.OriginPos[vm.PC][0]
+				return &ErrBlockNotClosed{Label: label}, []TokenPos{sourcePosBegin}
 			}
 
 			// 存在，记录
@@ -663,18 +781,20 @@ func (vm *VM) Run() error {
 
 			labelNum, err := strconv.ParseInt(label, 10, 64)
 			if err != nil {
-				return &ErrBlockLabelInvalid{Label: label, Reason: "not a number"}
+				sourcePosBegin := vm.OriginPos[vm.PC][2]
+				return &ErrBlockLabelInvalid{Label: label, Reason: "not a number"}, []TokenPos{sourcePosBegin}
 			}
 
 			vm.Blocks[labelNum] = block
 
 			vm.PC = endPC + 2 // 跳过 block body 和 end，到达 end 后一条指令
+			vm.Lines++
 
 		case OP_END:
 			// 理论上不可能到达这个位置
 			// 因为已经在 OP_BEGIN 处理
-
-			return &ErrUnexpectedEnd{Label: ins.ArgIdentifier[0]}
+			sourcePosEnd := vm.OriginPos[vm.PC][0]
+			return &ErrUnexpectedEnd{Label: ins.ArgIdentifier[0]}, []TokenPos{sourcePosEnd}
 
 		case OP_CALL_RS:
 			/*
@@ -696,13 +816,16 @@ func (vm *VM) Run() error {
 				o0
 			*/
 
+			// 此处个数不定，为了简化，出错位置统一定位在 call... 关键字
+
 			// ============================================================
 			// Step 1: 获取函数运行要求
 			// ============================================================
 			funName := ins.ArgIdentifier[0]
 			funReq, ok := vm.Env.Funcs[funName]
 			if !ok {
-				return &ErrFuncNotFound{Name: funName}
+				sourcePosCall := vm.OriginPos[vm.PC][0]
+				return &ErrFuncNotFound{Name: funName}, []TokenPos{sourcePosCall}
 			}
 
 			// ============================================================
@@ -715,17 +838,21 @@ func (vm *VM) Run() error {
 			outNumStr := ins.ArgIdentifier[2]
 			inNum, err := vm.getInt64Arg(inNumStr)
 			if err != nil {
-				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("invalid inNum '%s': %v", inNumStr, err)}
+				sourcePosCall := vm.OriginPos[vm.PC][0]
+				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("invalid inNum '%s': %v", inNumStr, err)}, []TokenPos{sourcePosCall}
 			}
 			if inNum != int64(len(funReq.ReqInput)) {
-				return &ErrFuncInputCount{Name: funName, Expected: len(funReq.ReqInput), Got: int(inNum)}
+				sourcePosCall := vm.OriginPos[vm.PC][0]
+				return &ErrFuncInputCount{Name: funName, Expected: len(funReq.ReqInput), Got: int(inNum)}, []TokenPos{sourcePosCall}
 			}
 			outNum, err := vm.getInt64Arg(outNumStr)
 			if err != nil {
-				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("invalid outNum '%s': %v", outNumStr, err)}
+				sourcePosCall := vm.OriginPos[vm.PC][0]
+				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("invalid outNum '%s': %v", outNumStr, err)}, []TokenPos{sourcePosCall}
 			}
 			if outNum != int64(len(funReq.ReqOutput)) {
-				return &ErrFuncOutputCount{Name: funName, Expected: len(funReq.ReqOutput), Got: int(outNum)}
+				sourcePosCall := vm.OriginPos[vm.PC][0]
+				return &ErrFuncOutputCount{Name: funName, Expected: len(funReq.ReqOutput), Got: int(outNum)}, []TokenPos{sourcePosCall}
 			}
 
 			// 2b. 校验 ReqInput 遵循约定：前面全是 int64，后面全是 bytes
@@ -734,12 +861,14 @@ func (vm *VM) Run() error {
 				switch t {
 				case "int64":
 					if seenBytes {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' ReqInput[%d]: int64 must not appear after bytes", funName, i)}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' ReqInput[%d]: int64 must not appear after bytes", funName, i)}, []TokenPos{sourcePosCall}
 					}
 				case "bytes":
 					seenBytes = true
 				default:
-					return &ErrUnsupportedInputType{FuncName: funName, InputIndex: i, InputType: t}
+					sourcePosCall := vm.OriginPos[vm.PC][0]
+					return &ErrUnsupportedInputType{FuncName: funName, InputIndex: i, InputType: t}, []TokenPos{sourcePosCall}
 				}
 			}
 
@@ -749,12 +878,14 @@ func (vm *VM) Run() error {
 				switch t {
 				case "int64":
 					if seenBytes {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' ReqOutput[%d]: int64 must not appear after bytes", funName, i)}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' ReqOutput[%d]: int64 must not appear after bytes", funName, i)}, []TokenPos{sourcePosCall}
 					}
 				case "bytes":
 					seenBytes = true
 				default:
-					return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' unsupported output type '%s'", funName, t)}
+					sourcePosCall := vm.OriginPos[vm.PC][0]
+					return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' unsupported output type '%s'", funName, t)}, []TokenPos{sourcePosCall}
 				}
 			}
 
@@ -766,22 +897,27 @@ func (vm *VM) Run() error {
 					outIdx := int64(idx) - inNum
 					// 不能是字面值
 					if len(argStr) >= 2 && argStr[0] == '\'' && argStr[len(argStr)-1] == '\'' {
-						return &ErrFuncOutputNotVar{FuncName: funName, OutputIndex: int(outIdx)}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrFuncOutputNotVar{FuncName: funName, OutputIndex: int(outIdx)}, []TokenPos{sourcePosCall}
 					}
 					if _, err := strconv.ParseInt(argStr, 10, 64); err == nil {
-						return &ErrFuncOutputNotVar{FuncName: funName, OutputIndex: int(outIdx)}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrFuncOutputNotVar{FuncName: funName, OutputIndex: int(outIdx)}, []TokenPos{sourcePosCall}
 					}
 					// 变量必须存在且类型匹配
 					ptr, exists := vm.Vars[argStr]
 					if !exists {
-						return &ErrVarNotFound{Name: argStr}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrVarNotFound{Name: argStr}, []TokenPos{sourcePosCall}
 					}
 					expectedType := funReq.ReqOutput[outIdx]
 					if expectedType == "int64" && ptr.Kind != Stack {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects int64 but variable '%s' is not stack", outIdx, funName, argStr)}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects int64 but variable '%s' is not stack", outIdx, funName, argStr)}, []TokenPos{sourcePosCall}
 					}
 					if expectedType == "bytes" && ptr.Kind != Heap {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects bytes but variable '%s' is not heap", outIdx, funName, argStr)}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects bytes but variable '%s' is not heap", outIdx, funName, argStr)}, []TokenPos{sourcePosCall}
 					}
 					outputVarNames[outIdx] = argStr
 				}
@@ -801,13 +937,15 @@ func (vm *VM) Run() error {
 				case "int64":
 					num, err := vm.getInt64Arg(argStr)
 					if err != nil {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("input %d for '%s': %v", idx, funName, err)}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("input %d for '%s': %v", idx, funName, err)}, []TokenPos{sourcePosCall}
 					}
 					ints = append(ints, num)
 				case "bytes":
 					b, err := vm.getBytesArg(argStr)
 					if err != nil {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("input %d for '%s': %v", idx, funName, err)}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("input %d for '%s': %v", idx, funName, err)}, []TokenPos{sourcePosCall}
 					}
 					rawBytes = append(rawBytes, b)
 				}
@@ -815,24 +953,28 @@ func (vm *VM) Run() error {
 
 			resultFilePath, err := vm.Env.CallRS(funName, ints, rawBytes)
 			if err != nil {
-				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' failed: %v", funName, err)}
+				sourcePosCall := vm.OriginPos[vm.PC][0]
+				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' failed: %v", funName, err)}, []TokenPos{sourcePosCall}
 			}
 
 			hexData, err := os.ReadFile(resultFilePath.PvPath)
 			if err != nil {
-				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("read '%s' failed: %v", resultFilePath, err)}
+				sourcePosCall := vm.OriginPos[vm.PC][0]
+				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("read '%s' failed: %v", resultFilePath, err)}, []TokenPos{sourcePosCall}
 			}
 
 			res, err := utils.SerializeSP1output(string(hexData))
 			if err != nil {
-				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("parse '%s' failed: %v", resultFilePath, err)}
+				sourcePosCall := vm.OriginPos[vm.PC][0]
+				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("parse '%s' failed: %v", resultFilePath, err)}, []TokenPos{sourcePosCall}
 			}
 
 			// ============================================================
 			// Step 4: 获取函数输出并解析，写入变量
 			// ============================================================
 			if len(res) != len(outputVarNames) {
-				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' output count mismatch: expected %d, got %d", funName, len(outputVarNames), len(res))}
+				sourcePosCall := vm.OriginPos[vm.PC][0]
+				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' output count mismatch: expected %d, got %d", funName, len(outputVarNames), len(res))}, []TokenPos{sourcePosCall}
 			}
 
 			for i, parsed := range res {
@@ -842,44 +984,56 @@ func (vm *VM) Run() error {
 				switch expectedType {
 				case "int64":
 					if parsed.Type != utils.TypeInt64 {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects int64 but got type 0x%02x", i, funName, parsed.Type)}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects int64 but got type 0x%02x", i, funName, parsed.Type)}, []TokenPos{sourcePosCall}
 					}
 					num, ok := parsed.Val.(int64)
 					if !ok {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s': value is not int64", i, funName)}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s': value is not int64", i, funName)}, []TokenPos{sourcePosCall}
 					}
 					if ok := vm.updateVarBySurfaceInt64(varName, num); !ok {
-						return &ErrVarNotFound{Name: varName}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrVarNotFound{Name: varName}, []TokenPos{sourcePosCall}
 					}
 
 				case "bytes":
 					if parsed.Type != utils.TypeBytes {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects bytes but got type 0x%02x", i, funName, parsed.Type)}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects bytes but got type 0x%02x", i, funName, parsed.Type)}, []TokenPos{sourcePosCall}
 					}
 					data, ok := parsed.Val.([]byte)
 					if !ok {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s': value is not []byte", i, funName)}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s': value is not []byte", i, funName)}, []TokenPos{sourcePosCall}
 					}
 					if ok := vm.updateVarBySurfaceBytes(varName, data); !ok {
-						return &ErrVarNotFound{Name: varName}
+						sourcePosCall := vm.OriginPos[vm.PC][0]
+						return &ErrVarNotFound{Name: varName}, []TokenPos{sourcePosCall}
 					}
 
 				default:
-					return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("unsupported output type for variable '%s'", varName)}
+					sourcePosCall := vm.OriginPos[vm.PC][0]
+					return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("unsupported output type for variable '%s'", varName)}, []TokenPos{sourcePosCall}
 				}
 			}
 
 			vm.PC++
+			vm.Lines++
 
 		case OP_CALL_C:
 			// todo 忽略
 			vm.PC++
+			vm.Lines++
+
 		case OP_CALL_CPP:
 			// todo 忽略
 			vm.PC++
+			vm.Lines++
 
 		default:
-			return &ErrUnknownOpcode{Opcode: int(ins.Op)}
+			sourcePosCall := vm.OriginPos[vm.PC][0]
+			return &ErrUnknownOpcode{Opcode: int(ins.Op)}, []TokenPos{sourcePosCall}
 		}
 
 		if vm.TraceMode {
@@ -887,10 +1041,10 @@ func (vm *VM) Run() error {
 			traceStep := vm.Mem.getDiff(vm.PreMem)
 			traceStep.VarsChanges = vm.getVarsDiff()
 			traceStep.BlocksChanges = vm.getBlocksDiff()
-			vm.Traces = append(vm.Traces, traceStep)
+			vm.Traces[vm.Lines] = traceStep
 		}
 	}
-	return nil
+	return nil, []TokenPos{}
 }
 
 // allocVar 声明一个变量并分配栈空间，返回指针; size only be needed for heap

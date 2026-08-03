@@ -5,6 +5,24 @@ import (
 	"errors"
 )
 
+func NewReplayVM(code []Instruction, env *Environment) *VM {
+	return &VM{
+		Code:      code,
+		PC:        0,
+		Lines:     0,
+		Mem:       NewMemoryObj(),
+		PreMem:    NewMemoryObj(),
+		Vars:      make(map[string]Ptr),
+		PreVars:   make(map[string]Ptr),
+		Blocks:    make(map[int64]Block),
+		PreBlocks: make(map[int64]Block),
+		Env:       env,
+		TraceMode: true,
+		Traces:    make(map[int64]TraceStep),
+		OriginPos: make(map[int64]map[int64]TokenPos),
+	}
+}
+
 // Replay 回放 VM 执行轨迹, 需要一个新 VM 实例和一个新内存状态
 func (vm *VM) Replay() error {
 	if !vm.TraceMode {
@@ -12,13 +30,13 @@ func (vm *VM) Replay() error {
 	}
 
 	// 同步内存状态
-	vm.Mem.applyDiff(vm.Traces[vm.PC])
+	vm.Mem.applyDiff(vm.Traces[vm.Lines])
 
 	// 同步变量状态
-	vm.applyVarsDiff(vm.Traces[vm.PC].VarsChanges)
+	vm.applyVarsDiff(vm.Traces[vm.Lines].VarsChanges)
 
 	// 同步块状态
-	vm.applyBlocksDiff(vm.Traces[vm.PC].BlocksChanges)
+	vm.applyBlocksDiff(vm.Traces[vm.Lines].BlocksChanges)
 
 	for vm.PC < int64(len(vm.Code)) {
 		ins := vm.Code[vm.PC]

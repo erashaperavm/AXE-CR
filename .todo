@@ -2,7 +2,8 @@ done 0. 审查 ai 写的 call rs opcode
 done 准备序列化 rs 工具
 done 1. real call rs
 done basic trace mode
-2. lines++ 和与 line 绑定的 Traces
+done 2. lines++ 和与 line 绑定的 Traces
+2. 隐私内存设计
 3. debug mode
 4. compiler
 5. execute-sce
@@ -10,3 +11,10 @@ done basic trace mode
 7. 定时保存
 8. 证明压缩
 
+2.. attach info
+把控制流搬进 RS 函数（外部函数）zkvm 证明。设计隐私内存（即哈希一些内存，比如外部函数的输入），在 sp1 zkvm 内部 commit 这些隐私内存附加到 public values，验证者只需要验证 proof（证明 public values 中的附加隐私内存是正确哈希得来的），然后验证这些隐私内存是不是由调用者提供的哈希（调用者计算哈希的过程同样在 sp1 内完成，避免调用者恶意伪造哈希导致执行者受罚）。
+
+然后我只需要写一篇文档指导合约开发者开发外部函数时使用什么代码处理并返回隐私内存。
+
+但这样可能是技术上的最佳解，但同时又导致：
+- Jmp、If、Add、Sub、Mul、Div、Eq、CMP 这些全作废（要么保留作为 “公共控制流”，那似乎塞翁失马，美名这样的公共控制流可以减少 zk 生成需求和验证成本，好像也不是很差）

@@ -8,7 +8,7 @@ import (
 )
 
 type Environment struct {
-	// 函数区域
+	// 执行者函数区域
 	// idx -> input slice idx
 	InputInt64  func(idx int64) int64
 	InputBytes  func(idx int64) []byte
@@ -21,6 +21,12 @@ type Environment struct {
 	CallRS      func(funName string, ints []int64, bytes [][]byte) (*execute.RsSp1Result, error)
 	CallC       func(funName string, input [][]byte) ([][]byte, error)
 	CallCpp     func(funName string, input [][]byte) ([][]byte, error)
+
+	// 验证者函数区域（无法解密，只能根据提供是 hash sum 来比较）
+	InputInt64Verify  func(idx int64, data int64) bool
+	InputBytesVerify  func(idx int64, data []byte) bool
+	OutputInt64Verify func(idx int64, data int64) bool
+	OutputBytesVerify func(idx int64, data []byte) bool
 
 	// 数据区域
 	Funcs       map[string]config.FunctionMeta
