@@ -10,23 +10,17 @@ import (
 type Environment struct {
 	// 执行者函数区域
 	// idx -> input slice idx
-	InputInt64  func(idx int64) int64
-	InputBytes  func(idx int64) []byte
-	OutputInt64 func(idx int64, data int64)
-	OutputBytes func(idx int64, data []byte)
-	ReadInt64   func(dataPosOnChain []byte) (int64, error)
-	ReadBytes   func(dataPosOnChain []byte) ([]byte, error)
-	WriteInt64  func(dataPosOnChain []byte, data int64) error
-	WriteBytes  func(dataPosOnChain []byte, data []byte) error
-	CallRS      func(funName string, ints []int64, bytes [][]byte) (*execute.RsSp1Result, error)
-	CallC       func(funName string, input [][]byte) ([][]byte, error)
-	CallCpp     func(funName string, input [][]byte) ([][]byte, error)
+	ReadInt64  func(dataPosOnChain []byte) (int64, error)
+	ReadBytes  func(dataPosOnChain []byte) ([]byte, error)
+	WriteInt64 func(dataPosOnChain []byte, data int64) error
+	WriteBytes func(dataPosOnChain []byte, data []byte) error
+	CallRS     func(funName string, ints []int64, bytes [][]byte) (*execute.RsSp1Result, error)
+	CallC      func(funName string, input [][]byte) ([][]byte, error)
+	CallCpp    func(funName string, input [][]byte) ([][]byte, error)
 
-	// 验证者函数区域（无法解密，只能根据提供是 hash sum 来比较）
-	InputInt64Verify  func(idx int64, data int64) bool
-	InputBytesVerify  func(idx int64, data []byte) bool
-	OutputInt64Verify func(idx int64, data int64) bool
-	OutputBytesVerify func(idx int64, data []byte) bool
+	// todo 验证者函数区域（无法解密，只能根据提供是 hash sum 来比较）
+	// Input 验证哈希 proof 和哈希链上比较
+	// Output 验证加密 proof
 
 	// 数据区域
 	Funcs       map[string]config.FunctionMeta
@@ -49,20 +43,6 @@ func NewEnvironment(
 		InputTypes:  inputTypes,
 		OutputTypes: outputTypes,
 		Funcs:       funcs,
-	}
-
-	e.InputInt64 = func(idx int64) int64 {
-		return bridge.InputInt64(idx)
-	}
-	e.InputBytes = func(idx int64) []byte {
-		return bridge.InputBytes(idx)
-	}
-
-	e.OutputInt64 = func(idx int64, data int64) {
-		bridge.OutputInt64(idx, data)
-	}
-	e.OutputBytes = func(idx int64, data []byte) {
-		bridge.OutputBytes(idx, data)
 	}
 
 	e.ReadInt64 = func(dataPosOnChain []byte) (int64, error) {

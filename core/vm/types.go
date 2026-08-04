@@ -44,8 +44,10 @@ const (
 type PtrKind byte
 
 const (
-	Stack PtrKind = iota
-	Heap
+	PubStack PtrKind = iota
+	PubHeap
+	PrivStack // 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
+	PrivHeap  // 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
 )
 
 type Ptr struct {

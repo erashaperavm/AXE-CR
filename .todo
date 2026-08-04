@@ -3,18 +3,15 @@ done 准备序列化 rs 工具
 done 1. real call rs
 done basic trace mode
 done 2. lines++ 和与 line 绑定的 Traces
-2. 隐私内存设计
+done 2. 隐私内存设计
+2. call rs 输出解析
+2. 隐私内存不可写保证
+2. 重放函数（公共层面重放，隐私层面无缝对接 zkvm）
+2. bridge 验证隐私内存哈希（执行者 zkvm 内计算隐私输入的哈希对应序号，验证者链上确认）
+2. about_commit.md 完善
 3. debug mode
 4. compiler
 5. execute-sce
 6. verify-sce
 7. 定时保存
 8. 证明压缩
-
-2.. attach info
-把控制流搬进 RS 函数（外部函数）zkvm 证明。设计隐私内存（即哈希一些内存，比如外部函数的输入），在 sp1 zkvm 内部 commit 这些隐私内存附加到 public values，验证者只需要验证 proof（证明 public values 中的附加隐私内存是正确哈希得来的），然后验证这些隐私内存是不是由调用者提供的哈希（调用者计算哈希的过程同样在 sp1 内完成，避免调用者恶意伪造哈希导致执行者受罚）。
-
-然后我只需要写一篇文档指导合约开发者开发外部函数时使用什么代码处理并返回隐私内存。
-
-但这样可能是技术上的最佳解，但同时又导致：
-- Jmp、If、Add、Sub、Mul、Div、Eq、CMP 这些全作废（要么保留作为 “公共控制流”，那似乎塞翁失马，美名这样的公共控制流可以减少 zk 生成需求和验证成本，好像也不是很差）

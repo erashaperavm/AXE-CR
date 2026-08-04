@@ -22,18 +22,18 @@ func (m *Memory) allocStack() Ptr {
 	addr := nextStackAddr
 	nextStackAddr++
 	m.Stack[addr] = 0
-	return Ptr{Kind: Stack, Pointer: addr}
+	return Ptr{Kind: PubStack, Pointer: addr}
 }
 
 func (m *Memory) allocHeap(size int64) Ptr {
 	addr := nextHeapAddr
 	nextHeapAddr += size
 	m.Heap[addr] = make([]byte, size)
-	return Ptr{Kind: Heap, Pointer: addr}
+	return Ptr{Kind: PubHeap, Pointer: addr}
 }
 
 func (m *Memory) readStack(ptr Ptr) (int64, bool) {
-	if ptr.Kind != Stack {
+	if ptr.Kind != PubStack && ptr.Kind != PrivStack {
 		return 0, false
 	}
 	i, ok := m.Stack[ptr.Pointer]
@@ -45,7 +45,7 @@ func (m *Memory) readStack(ptr Ptr) (int64, bool) {
 }
 
 func (m *Memory) writeStack(data int64, ptr Ptr) bool {
-	if ptr.Kind != Stack {
+	if ptr.Kind != PubStack {
 		return false
 	}
 	_, ok := m.Stack[ptr.Pointer]
@@ -58,7 +58,7 @@ func (m *Memory) writeStack(data int64, ptr Ptr) bool {
 }
 
 func (m *Memory) readHeap(ptr Ptr) ([]byte, bool) {
-	if ptr.Kind != Heap {
+	if ptr.Kind != PubHeap && ptr.Kind != PrivHeap {
 		return nil, false
 	}
 	b, ok := m.Heap[ptr.Pointer]
@@ -70,7 +70,7 @@ func (m *Memory) readHeap(ptr Ptr) ([]byte, bool) {
 }
 
 func (m *Memory) writeHeap(data []byte, ptr Ptr) bool {
-	if ptr.Kind != Heap {
+	if ptr.Kind != PubHeap {
 		return false
 	}
 	_, ok := m.Heap[ptr.Pointer]
@@ -83,10 +83,16 @@ func (m *Memory) writeHeap(data []byte, ptr Ptr) bool {
 
 func (m *Memory) free(p Ptr) {
 	switch p.Kind {
-	case Stack:
+	case PubStack:
 		delete(m.Stack, p.Pointer)
-	case Heap:
+	case PubHeap:
 		delete(m.Heap, p.Pointer)
+	case PrivStack:
+		// 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
+	case PrivHeap:
+		// 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
+	default:
+		panic("unimplemented ptr kind")
 	}
 }
 
