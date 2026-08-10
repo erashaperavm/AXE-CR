@@ -11,10 +11,35 @@ type Memory struct {
 	Heap  map[int64][]byte
 }
 
+// PrivacyMemory keeps a counter that ensures data can be only updated one time
+type PrivacyMemory struct {
+	Stack map[int64]struct {
+		Detail  int64
+		Counter int8
+	}
+	Heap map[int64]struct {
+		Detail  []byte
+		Counter int8
+	}
+}
+
 func NewMemoryObj() *Memory {
 	return &Memory{
 		Stack: make(map[int64]int64),
 		Heap:  make(map[int64][]byte),
+	}
+}
+
+func NewPrivacyMemoryObj() *PrivacyMemory {
+	return &PrivacyMemory{
+		Stack: make(map[int64]struct {
+			Detail  int64
+			Counter int8
+		}),
+		Heap: make(map[int64]struct {
+			Detail  []byte
+			Counter int8
+		}),
 	}
 }
 
@@ -88,9 +113,9 @@ func (m *Memory) free(p Ptr) {
 	case PubHeap:
 		delete(m.Heap, p.Pointer)
 	case PrivStack:
-		// 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
+		panic("PrivStack is not supported")
 	case PrivHeap:
-		// 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
+		panic("PrivHeap is not supported")
 	default:
 		panic("unimplemented ptr kind")
 	}
@@ -156,4 +181,96 @@ func (m *Memory) applyDiff(diff TraceStep) {
 		}
 	}
 	return
+}
+
+func (m *PrivacyMemory) allocStack() Ptr {
+	addr := nextStackAddr
+	nextStackAddr++
+	m.Stack[addr] = struct {
+		Detail  int64
+		Counter int8
+	}{Detail: 0, Counter: 0}
+	return Ptr{Kind: PrivStack, Pointer: addr}
+}
+
+func (m *PrivacyMemory) allocHeap(size int64) Ptr {
+	addr := nextHeapAddr
+	nextHeapAddr += size
+	m.Heap[addr] = struct {
+		Detail  []byte
+		Counter int8
+	}{Detail: make([]byte, size), Counter: 0}
+	return Ptr{Kind: PrivHeap, Pointer: addr}
+}
+
+func (m *PrivacyMemory) readStack(ptr Ptr) (int64, bool) {
+	if ptr.Kind != PrivStack {
+		return 0, false
+	}
+	i, ok := m.Stack[ptr.Pointer]
+	if !ok {
+		return 0, false
+	}
+
+	return i.Detail, true
+}
+
+func (m *PrivacyMemory) writeStack(data int64, ptr Ptr) bool {
+	if ptr.Kind != PrivStack {
+		return false
+	}
+	_, ok := m.Stack[ptr.Pointer]
+	if !ok {
+		// unexisted ptr
+		return false
+	}
+	if m.Stack[ptr.Pointer].Counter != 0 {
+		return false
+	}
+	m.Stack[ptr.Pointer] = struct {
+		Detail  int64
+		Counter int8
+	}{Detail: data, Counter: 1}
+	return true
+}
+
+func (m *PrivacyMemory) readHeap(ptr Ptr) ([]byte, bool) {
+	if ptr.Kind != PrivHeap {
+		return nil, false
+	}
+	b, ok := m.Heap[ptr.Pointer]
+	if !ok {
+		return nil, false
+	}
+
+	return b.Detail, true
+}
+
+func (m *PrivacyMemory) writeHeap(data []byte, ptr Ptr) bool {
+	if ptr.Kind != PrivHeap {
+		return false
+	}
+	_, ok := m.Heap[ptr.Pointer]
+	if !ok {
+		return false
+	}
+	if m.Heap[ptr.Pointer].Counter != 0 {
+		return false
+	}
+	m.Heap[ptr.Pointer] = struct {
+		Detail  []byte
+		Counter int8
+	}{Detail: data, Counter: 1}
+	return true
+}
+
+func (m *PrivacyMemory) free(p Ptr) {
+	switch p.Kind {
+	case PrivStack:
+		// 隐私栈不支持 VM 层级释放
+	case PrivHeap:
+		// 隐私堆不支持 VM 层级释放
+	default:
+		panic("unimplemented ptr kind")
+	}
 }

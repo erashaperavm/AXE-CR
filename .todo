@@ -5,7 +5,7 @@ done basic trace mode
 done 2. lines++ 和与 line 绑定的 Traces
 done 2. 隐私内存设计
 2. call rs 输出解析
-2. 隐私内存不可写保证
+done 2. 隐私内存不可写保证
 2. 重放函数（公共层面重放，隐私层面无缝对接 zkvm）
 2. bridge 验证隐私内存哈希（执行者 zkvm 内计算隐私输入的哈希对应序号，验证者链上确认）
 2. about_commit.md 完善

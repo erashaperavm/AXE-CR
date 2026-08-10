@@ -61,6 +61,39 @@ type Instruction struct {
 	ArgIdentifier []string
 }
 
+type PublicInput struct {
+	Int64 []int64
+	Bytes [][]byte
+}
+
+type PrivateInput struct {
+	Int64 []int64
+	Bytes [][]byte
+}
+
+type PrivateInputExpr struct {
+	Kind    PtrKind
+	Idx     int64
+	HashSum [32]byte
+}
+
+type PublicOutput struct {
+	Int64 []int64
+	Bytes [][]byte
+}
+
+type PrivateOutput struct {
+	Kind          PtrKind
+	Idx           int64
+	EncryptedData []byte
+}
+
+type PrivateOriginOutputExpr struct {
+	Kind    PtrKind
+	Idx     int64
+	HashSum [32]byte
+}
+
 type Block struct {
 	BeginPC int64
 	EndPC   int64

@@ -11,23 +11,27 @@ import (
 type VM struct {
 	Code      []Instruction                // 字节码
 	OriginPos map[int64]map[int64]TokenPos // 原始位置，与 Code 里面的每一个 string Token 一一对应
-	Debug     bool                         // 调试模式
+	DebugMode bool                         // 调试模式
 	TraceMode bool                         // 是否启用轨迹
 	Env       *Environment                 // 调用外部函数
 
-	Int64PublicInputs  []int64  // 公共输入的 int64 数据
-	BytesPublicInputs  [][]byte // 公共输入的 bytes 数据
-	Int64PublicOutputs []int64  // 公共输出的 int64 数据
-	BytesPublicOutputs [][]byte // 公共输出的 bytes 数据
+	// 公共输入
+	PubIn PublicInput
 
-	// 隐私输入直接在创建虚拟机时硬分配到虚拟机内，只读，内存地址实际为隐私输入参数 idx 索引
-	/*
-		Int64PrivateInputs  []int64  // 私有输入的 int64 数据（已经在节点端门限解密，结果需要在节点端再聚合成员节点的分片解密 proof）
-		BytesPrivateInputs  [][]byte // 私有输入的 bytes 数据（已经在节点端门限解密，结果需要在节点端再聚合成员节点的分片解密 proof）
-	*/
+	// 隐私输入
+	PrivIn PrivateInput
 
-	Int64PrivateOutputs []int64  // 私有输出的 int64 数据（需在节点端加密，结果需要在节点端附带加密 proof）
-	BytesPrivateOutputs [][]byte // 私有输出的 bytes 数据（需在节点端加密，结果需要在节点端附带加密 proof）
+	// 隐私输入表示
+	PrivInExpr []PrivateInputExpr
+
+	// 公共输出
+	PubOut PublicOutput
+
+	// 隐私输出
+	PrivOut []PrivateOutput
+
+	// 隐私输出表示
+	PrivOutExpr []PrivateOriginOutputExpr
 
 	PC    int64 // 第几行了
 	Lines int64 // 真实执行命令函数行数
@@ -41,38 +45,104 @@ type VM struct {
 	Blocks    map[int64]Block // 代码标记块
 	PreBlocks map[int64]Block // 上一帧的代码标记块
 
-	PrivacyMem    *Memory            // 隐私内存，用于存储隐私数据，不暴露给验证者，只能直接输入 zkVM
-	PrivacyMemExp map[int64][32]byte // 隐私内存表示，用于验证者比较隐私数据是否正确，使用 SHA256 计算得到
+	PrivacyMem *PrivacyMemory // 隐私内存，用于存储隐私数据，不暴露给验证者，只能直接输入 zkVM
 
 	Traces map[int64]TraceStep // 执行轨迹, vm.Traces[vm.Lines]
 
 }
 
 // NewExecuteVM 创建一个 VM，初始化内存与变量表
-func NewExecuteVM(code []Instruction, env *Environment, debug bool, traceMode bool) *VM {
+func NewExecuteVM(
+	code []Instruction,
+	env *Environment,
+	debug bool,
+	traceMode bool,
+	pubIn PublicInput,
+	privIn PrivateInput,
+	privInExpr []PrivateInputExpr,
+	pubOut PublicOutput,
+	privOut []PrivateOutput,
+	privOutExpr []PrivateOriginOutputExpr,
+) *VM {
 	return &VM{
-		Code:      code,
-		PC:        0,
-		Lines:     0,
-		Mem:       NewMemoryObj(),
-		PreMem:    NewMemoryObj(),
-		Vars:      make(map[string]Ptr),
-		PreVars:   make(map[string]Ptr),
-		Blocks:    make(map[int64]Block),
-		PreBlocks: make(map[int64]Block),
-		Env:       env,
-		Debug:     debug,
-		TraceMode: traceMode,
-		Traces:    make(map[int64]TraceStep),
-		OriginPos: make(map[int64]map[int64]TokenPos),
+		Code:        code,
+		OriginPos:   make(map[int64]map[int64]TokenPos),
+		DebugMode:   debug,
+		TraceMode:   traceMode,
+		Env:         env,
+		PubIn:       pubIn,
+		PrivIn:      privIn,
+		PrivInExpr:  privInExpr,
+		PubOut:      pubOut,
+		PrivOut:     privOut,
+		PrivOutExpr: privOutExpr,
+		PC:          0,
+		Lines:       0,
+		Mem:         NewMemoryObj(),
+		PreMem:      NewMemoryObj(),
+		PrivacyMem:  NewPrivacyMemoryObj(),
+		Vars:        make(map[string]Ptr),
+		PreVars:     make(map[string]Ptr),
+		Blocks:      make(map[int64]Block),
+		PreBlocks:   make(map[int64]Block),
+		Traces:      make(map[int64]TraceStep),
 	}
 }
 
 func (vm *VM) Run() (error, []TokenPos) {
+	// 将输入映射到内存
+	// 处理公共输入 Bytes
+	for i, pubIn := range vm.PubIn.Bytes {
+		name := fmt.Sprintf("__internal_pub_in_%d", i)
+		_ = vm.allocVar(name, PubHeap, int64(len(pubIn)))
+		vm.updateVarBySurfaceBytesPub(name, pubIn)
+	}
+	// 处理公共输入 int64
+	for i, pubIn := range vm.PubIn.Int64 {
+		name := fmt.Sprintf("__internal_pub_in_%d", i)
+		_ = vm.allocVar(name, PubStack, 0)
+		vm.updateVarBySurfaceInt64Pub(name, pubIn)
+	}
+	// 处理隐私输入 Bytes
+	for i, privIn := range vm.PrivIn.Bytes {
+		name := fmt.Sprintf("__internal_priv_in_%d", i)
+		_ = vm.allocVar(name, PrivHeap, int64(len(privIn)))
+		vm.updateVarBySurfaceBytesPriv(name, privIn)
+	}
+	// 处理隐私输入 int64
+	for i, privIn := range vm.PrivIn.Int64 {
+		name := fmt.Sprintf("__internal_priv_in_%d", i)
+		_ = vm.allocVar(name, PrivStack, 0)
+		vm.updateVarBySurfaceInt64Priv(name, privIn)
+	}
+	// 处理隐私输入内存表示
+	for i, privIn := range vm.PrivInExpr {
+		name := fmt.Sprintf("__internal_priv_in_expr_%d", i)
+		_ = vm.allocVar(name, PrivHeap, 32)
+		vm.updateVarBySurfaceBytesPub(name, privIn.HashSum[:])
+	}
+	// 创建公共输出变量 bytes
+	for i, pubOut := range vm.PubOut.Bytes {
+		name := fmt.Sprintf("__internal_pub_out_%d", i)
+		_ = vm.allocVar(name, PubHeap, int64(len(pubOut)))
+	}
+	// 创建公共输出变量 int64
+	for i, _ := range vm.PubOut.Int64 {
+		name := fmt.Sprintf("__internal_pub_out_%d", i)
+		_ = vm.allocVar(name, PubStack, 0)
+	}
+	// 隐私加密输出由于未知 size,暂时不初始化内存
+
+	// 创建隐私输出内存表示
+	for i, _ := range vm.PrivOutExpr {
+		name := fmt.Sprintf("__internal_priv_out_expr_%d", i)
+		_ = vm.allocVar(name, PubHeap, 32)
+	}
+
 	for vm.PC < int64(len(vm.Code)) {
 		ins := vm.Code[vm.PC]
 
-		if vm.Debug {
+		if vm.DebugMode {
 			fmt.Println(fmt.Sprintf("")) // todo
 		}
 
@@ -176,71 +246,10 @@ func (vm *VM) Run() (error, []TokenPos) {
 
 		case OP_INPUT:
 			/*
-				OP_INPUT -> MAIN INS
-
-				int64
-				Ptr
-
-				idx -> 输入参数第几个
-				data -> 使用变量来存储输入的数据
+				OP_INPUT
 			*/
 
-			idx, ok := vm.getInt64Var(ins.ArgIdentifier[0])
-			if !ok {
-				sourcePos := vm.OriginPos[vm.PC][3]
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
-			}
-			dataPtr, ok := vm.Vars[ins.ArgIdentifier[1]]
-			if !ok {
-				sourcePos := vm.OriginPos[vm.PC][4]
-				return &ErrPtrNotFound{Name: ins.ArgIdentifier[1]}, []TokenPos{sourcePos}
-			}
-
-			switch dataPtr.Kind {
-			case PubStack:
-				data := vm.Int64PublicInputs[idx]
-				err := vm.irUpdaterInt64(data, ins)
-				if err != nil {
-					sourcePos := vm.OriginPos[vm.PC][4]
-					return &InputErr{
-						Index: idx,
-						Err:   err,
-					}, []TokenPos{sourcePos}
-				}
-			case PubHeap:
-				data := vm.BytesPublicInputs[idx]
-				err := vm.irUpdaterBytes(data, ins)
-				if err != nil {
-					sourcePos := vm.OriginPos[vm.PC][4]
-					return &InputErr{
-						Index: idx,
-						Err:   err,
-					}, []TokenPos{sourcePos}
-				}
-			case PrivStack:
-				data := vm.PrivacyMem.Stack[idx]
-				err := vm.irUpdaterInt64(data, ins)
-				if err != nil {
-					sourcePos := vm.OriginPos[vm.PC][4]
-					return &InputErr{
-						Index: idx,
-						Err:   err,
-					}, []TokenPos{sourcePos}
-				}
-			case PrivHeap:
-				data := vm.PrivacyMem.Heap[idx]
-				err := vm.irUpdaterBytes(data, ins)
-				if err != nil {
-					sourcePos := vm.OriginPos[vm.PC][4]
-					return &InputErr{
-						Index: idx,
-						Err:   err,
-					}, []TokenPos{sourcePos}
-				}
-			default:
-				sourcePos := vm.OriginPos[vm.PC][4]
-				return &ErrUnsupportedMemType{MemType: dataPtr.Kind}, []TokenPos{sourcePos}
-			}
+			// 开头标志性语句，无实际语义
 
 			vm.PC++
 			vm.Lines++
@@ -321,68 +330,11 @@ func (vm *VM) Run() (error, []TokenPos) {
 				OP_OUTPUT -> MAIN INS
 
 				int64
-				Ptr
+				var_name
 
 				idx -> 输出参数第几个
-				data -> 使用变量来存储将要输出的数据
+				varname-> 使用变量来存储将要输出的数据
 			*/
-
-			idx, ok := vm.getInt64Var(ins.ArgIdentifier[0])
-			if !ok {
-				sourcePos := vm.OriginPos[vm.PC][3]
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
-			}
-			dataPtr, ok := vm.Vars[ins.ArgIdentifier[1]]
-			if !ok {
-				sourcePos := vm.OriginPos[vm.PC][4]
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[1]}, []TokenPos{sourcePos}
-			}
-
-			switch dataPtr.Kind {
-			case PubStack:
-				data, err := vm.getInt64Arg(ins.ArgIdentifier[4])
-				if err != nil {
-					sourcePos := vm.OriginPos[vm.PC][4]
-					return &OutputErr{
-						Index: idx,
-						Err:   err,
-					}, []TokenPos{sourcePos}
-				}
-				vm.Int64PublicOutputs[idx] = data
-			case PubHeap:
-				data, err := vm.getBytesArg(ins.ArgIdentifier[4])
-				if err != nil {
-					sourcePos := vm.OriginPos[vm.PC][4]
-					return &OutputErr{
-						Index: idx,
-						Err:   err,
-					}, []TokenPos{sourcePos}
-				}
-				vm.BytesPublicOutputs[idx] = data
-			case PrivStack:
-				data, err := vm.getInt64Arg(ins.ArgIdentifier[4])
-				if err != nil {
-					sourcePos := vm.OriginPos[vm.PC][4]
-					return &OutputErr{
-						Index: idx,
-						Err:   err,
-					}, []TokenPos{sourcePos}
-				}
-				vm.Int64PrivateOutputs[idx] = data
-			case PrivHeap:
-				data, err := vm.getBytesArg(ins.ArgIdentifier[4])
-				if err != nil {
-					sourcePos := vm.OriginPos[vm.PC][4]
-					return &OutputErr{
-						Index: idx,
-						Err:   err,
-					}, []TokenPos{sourcePos}
-				}
-				vm.BytesPrivateOutputs[idx] = data
-			default:
-				sourcePos := vm.OriginPos[vm.PC][4]
-				return &ErrUnsupportedMemType{MemType: dataPtr.Kind}, []TokenPos{sourcePos}
-			}
 
 			vm.PC++
 			vm.Lines++
@@ -396,7 +348,7 @@ func (vm *VM) Run() (error, []TokenPos) {
 				int64
 
 				varname _> 变量名称
-				mem_type -> 内存类型（编译器自动根据数据类型判断：int64 -> stack; []byte -> heap）
+				mem_type -> 内存类型（PubStack, PrivStack, PubHeap, PrivHeap)
 				size -> 分配内存大小 (如果为 heap）
 			*/
 
@@ -455,16 +407,52 @@ func (vm *VM) Run() (error, []TokenPos) {
 
 			switch kind {
 			case surfaceInt64:
-				ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[0], num)
-				if !ok {
+				switch vm.Vars[ins.ArgIdentifier[0]].Kind {
+				case PubStack:
+					ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[0], num)
+					if !ok {
+						sourcePos := vm.OriginPos[vm.PC][3]
+						return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
+					}
+				case PrivStack:
+					// Priv 数据修改只允许在 Call 分支中处理
 					sourcePos := vm.OriginPos[vm.PC][3]
-					return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
+					return &ErrPrivacyMemUpdateInNoCallIns{ThisIns: "update"}, []TokenPos{sourcePos}
+				case PubHeap:
+					// PubHeap 数据修改只允许用 Heap 类型数据替代
+					sourcePos := vm.OriginPos[vm.PC][3]
+					return &ErrTypeMismatch{
+						Expected: "PubStack",
+						Got:      "PubHeap",
+					}, []TokenPos{sourcePos}
+				case PrivHeap:
+					// Priv 数据修改只允许在 Call 分支中处理
+					sourcePos := vm.OriginPos[vm.PC][3]
+					return &ErrPrivacyMemUpdateInNoCallIns{ThisIns: "update"}, []TokenPos{sourcePos}
 				}
 			case surfaceBytes:
-				ok := vm.updateVarBySurfaceBytes(ins.ArgIdentifier[0], byt)
-				if !ok {
+				switch vm.Vars[ins.ArgIdentifier[0]].Kind {
+				case PubStack:
+					// PubStack 数据修改只允许用 Stack 类型数据替代
 					sourcePos := vm.OriginPos[vm.PC][3]
-					return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
+					return &ErrTypeMismatch{
+						Expected: "PubHeap",
+						Got:      "PubStack",
+					}, []TokenPos{sourcePos}
+				case PrivStack:
+					// Priv 数据修改只允许在 Call 分支中处理
+					sourcePos := vm.OriginPos[vm.PC][3]
+					return &ErrPrivacyMemUpdateInNoCallIns{ThisIns: "update"}, []TokenPos{sourcePos}
+				case PubHeap:
+					ok := vm.updateVarBySurfaceBytesPub(ins.ArgIdentifier[0], byt)
+					if !ok {
+						sourcePos := vm.OriginPos[vm.PC][3]
+						return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
+					}
+				case PrivHeap:
+					// Priv 数据修改只允许在 Call 分支中处理
+					sourcePos := vm.OriginPos[vm.PC][3]
+					return &ErrPrivacyMemUpdateInNoCallIns{ThisIns: "update"}, []TokenPos{sourcePos}
 				}
 			case identifier:
 				ok := vm.updateVarByIdentifier(ins.ArgIdentifier[0], ins.ArgIdentifier[1])
@@ -521,7 +509,7 @@ func (vm *VM) Run() (error, []TokenPos) {
 				}, []TokenPos{sourcePosA, sourcePosB}
 			}
 
-			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum+bNum)
+			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], aNum+bNum)
 			if !ok {
 				sourcePosSum := vm.OriginPos[vm.PC][6]
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSum}
@@ -553,7 +541,7 @@ func (vm *VM) Run() (error, []TokenPos) {
 				}, []TokenPos{sourcePosA, sourcePosB}
 			}
 
-			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum-bNum)
+			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], aNum-bNum)
 			if !ok {
 				sourcePosSub := vm.OriginPos[vm.PC][6]
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSub}
@@ -585,7 +573,7 @@ func (vm *VM) Run() (error, []TokenPos) {
 				}, []TokenPos{sourcePosA, sourcePosB}
 			}
 
-			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum*bNum)
+			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], aNum*bNum)
 			if !ok {
 				sourcePosProduct := vm.OriginPos[vm.PC][6]
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosProduct}
@@ -617,7 +605,7 @@ func (vm *VM) Run() (error, []TokenPos) {
 				}, []TokenPos{sourcePosA, sourcePosB}
 			}
 
-			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], aNum/bNum)
+			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], aNum/bNum)
 			if !ok {
 				sourcePosDiv := vm.OriginPos[vm.PC][6]
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosDiv}
@@ -657,7 +645,7 @@ func (vm *VM) Run() (error, []TokenPos) {
 				boolean = 0
 			}
 
-			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
+			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], boolean)
 			if !ok {
 				sourcePosSum := vm.OriginPos[vm.PC][6]
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSum}
@@ -697,7 +685,7 @@ func (vm *VM) Run() (error, []TokenPos) {
 				boolean = 0
 			}
 
-			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
+			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], boolean)
 			if !ok {
 				sourcePosSum := vm.OriginPos[vm.PC][6]
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSum}
@@ -736,7 +724,7 @@ func (vm *VM) Run() (error, []TokenPos) {
 				boolean = 0
 			}
 
-			ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], boolean)
+			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], boolean)
 			if !ok {
 				sourcePosSum := vm.OriginPos[vm.PC][6]
 				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSum}
@@ -910,10 +898,11 @@ func (vm *VM) Run() (error, []TokenPos) {
 			// ============================================================
 			// Step 1: 获取函数运行要求
 			// ============================================================
+
+			// todo 从这开始继续改，要求结构体也该
 			funName := ins.ArgIdentifier[0]
 			funReq, ok := vm.Env.Funcs[funName]
 			if !ok {
-				sourcePosCall := vm.OriginPos[vm.PC][0]
 				return &ErrFuncNotFound{Name: funName}, []TokenPos{sourcePosCall}
 			}
 
@@ -971,7 +960,7 @@ func (vm *VM) Run() (error, []TokenPos) {
 				}
 			}
 
-			// 2d. 收集输出变量名并校验（必须是已存在的变量，不能是字面值）
+			// 2d. 收集输出变量名并校验（必须是已存在的隐私变量，不能是字面值）
 			argStrs := ins.ArgIdentifier[3:]
 			outputVarNames := make([]string, outNum)
 			for idx, argStr := range argStrs {
@@ -1043,10 +1032,36 @@ func (vm *VM) Run() (error, []TokenPos) {
 			}
 
 			// ============================================================
-			// Step 4: 获取函数公共输出并解析，写入变量
-			//         获取函数隐私内存哈希计算结果并解析，写入变量
+			// Step 4: 获取函数公共输出写入变量
+			//         获取函数加密隐私输出写入变量
+			//		   获取函数隐私内存哈希计算结果写入变量
 			// ============================================================
-			public
+
+			publicOut := res.FirstCommit
+			hashOut := res.ThirdCommit
+			for i, v := range publicOut.Values {
+				switch v.Type {
+				case utils.TypeInt64:
+					num, ok := v.Value.(int64)
+					if !ok {
+						return &ErrTypeMismatch{Expected: "int64", Got: fmt.Sprintf("%T", v.Value)}, []TokenPos{sourcePosCall}
+					}
+					vm.updateVarBySurfaceInt64Priv(outputVarNames[i], num)
+				case utils.TypeBytes:
+					b, ok := v.Value.([]byte)
+					if !ok {
+						return &ErrTypeMismatch{Expected: "bytes", Got: fmt.Sprintf("%T", v.Value)}, []TokenPos{sourcePosCall}
+					}
+					vm.updateVarBySurfaceBytesPriv(outputVarNames[i], b)
+				default:
+					return &ErrUnsupportedOutputType{FuncName: funName, OutputIndex: i, OutputType: strconv.Itoa(int(v.Type))}, []TokenPos{sourcePosCall}
+				}
+			}
+
+			encryptedOut := res.SecondCommit
+			for i, c := range encryptedOut.EncryptedItems {
+
+			}
 
 			vm.PC++
 			vm.Lines++
@@ -1089,6 +1104,7 @@ func (vm *VM) allocVar(name string, memType PtrKind, size int64) Ptr {
 			ptr = vm.Mem.allocHeap(size)
 		case PrivStack:
 			// 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
+			ptr = vm.PrivacyMem.allocStack()
 		case PrivHeap:
 			// 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
 			ptr = vm.PrivacyMem.allocHeap(size)
@@ -1101,40 +1117,40 @@ func (vm *VM) allocVar(name string, memType PtrKind, size int64) Ptr {
 	return vm.Vars[name] // 已存在则返回原指针
 }
 
-// getInt64Var 获取 Stack 变量值（int64）
-func (vm *VM) getInt64Var(name string) (int64, bool) {
+// getInt64VarPub 获取 Stack 变量值（int64）
+func (vm *VM) getInt64VarPub(name string) (int64, bool) {
 	ptr, ok := vm.Vars[name]
-	if !ok || ptr.Kind != PubStack && ptr.Kind != PrivStack {
+	if !ok || ptr.Kind != PubStack {
 		return 0, false
 	}
 	return vm.Mem.readStack(ptr)
 }
 
-// getInt64VarOnlyPriv 获取隐私内存变量值（int64）
-func (vm *VM) getInt64VarOnlyPriv(name string) (int64, bool) {
+// getInt64VarPriv 获取隐私内存变量值（int64）
+func (vm *VM) getInt64VarPriv(name string) (int64, bool) {
 	ptr, ok := vm.Vars[name]
 	if !ok || ptr.Kind != PrivStack {
 		return 0, false
 	}
-	return vm.Mem.readStack(ptr)
+	return vm.PrivacyMem.readStack(ptr)
 }
 
-// getBytesVar 获取 Heap 变量值（[]byte）
-func (vm *VM) getBytesVar(name string) ([]byte, bool) {
+// getBytesVarPub 获取 Heap 变量值（[]byte）
+func (vm *VM) getBytesVarPub(name string) ([]byte, bool) {
 	ptr, ok := vm.Vars[name]
-	if !ok || ptr.Kind != PubHeap && ptr.Kind != PrivHeap {
+	if !ok || ptr.Kind != PubHeap {
 		return nil, false
 	}
 	return vm.Mem.readHeap(ptr)
 }
 
-// getBytesVarOnlyPriv 获取隐私内存变量值（[]byte）
-func (vm *VM) getBytesVarOnlyPriv(name string) ([]byte, bool) {
+// getBytesVarPriv 获取隐私内存变量值（[]byte）
+func (vm *VM) getBytesVarPriv(name string) ([]byte, bool) {
 	ptr, ok := vm.Vars[name]
 	if !ok || ptr.Kind != PrivHeap {
 		return nil, false
 	}
-	return vm.Mem.readHeap(ptr)
+	return vm.PrivacyMem.readHeap(ptr)
 }
 
 // updateVarByIdentifier 设置变量值
@@ -1166,17 +1182,17 @@ func (vm *VM) updateVarByIdentifier(name string, valIdentifier string) bool {
 		}
 		return vm.Mem.writeHeap(data, targetPtr)
 	case PrivStack:
-		// 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
+		// 隐私内存不支持映射到公共内存
 		return false
 	case PrivHeap:
-		// 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
+		// 隐私内存不支持映射到公共内存
 		return false
 	default:
 		panic(fmt.Sprintf("unsupported ptr kind: %v", dataPtr.Kind))
 	}
 }
 
-func (vm *VM) updateVarBySurfaceInt64(name string, i int64) bool {
+func (vm *VM) updateVarBySurfaceInt64Pub(name string, i int64) bool {
 	ptr, ok := vm.Vars[name]
 	if !ok {
 		return false
@@ -1188,7 +1204,7 @@ func (vm *VM) updateVarBySurfaceInt64(name string, i int64) bool {
 	return vm.Mem.writeStack(i, ptr)
 }
 
-func (vm *VM) updateVarBySurfaceBytes(name string, data []byte) bool {
+func (vm *VM) updateVarBySurfaceBytesPub(name string, data []byte) bool {
 	ptr, ok := vm.Vars[name]
 	if !ok {
 		return false
@@ -1200,6 +1216,30 @@ func (vm *VM) updateVarBySurfaceBytes(name string, data []byte) bool {
 	return vm.Mem.writeHeap(data, ptr)
 }
 
+func (vm *VM) updateVarBySurfaceInt64Priv(name string, i int64) bool {
+	ptr, ok := vm.Vars[name]
+	if !ok {
+		return false
+	}
+	if ptr.Kind != PrivStack {
+		return false
+	}
+
+	return vm.PrivacyMem.writeStack(i, ptr)
+}
+
+func (vm *VM) updateVarBySurfaceBytesPriv(name string, data []byte) bool {
+	ptr, ok := vm.Vars[name]
+	if !ok {
+		return false
+	}
+	if ptr.Kind != PrivHeap {
+		return false
+	}
+
+	return vm.PrivacyMem.writeHeap(data, ptr)
+}
+
 // dropVar 删除变量并释放对应的栈/堆内存
 func (vm *VM) dropVar(name string) error {
 	ptr, ok := vm.Vars[name]
@@ -1208,58 +1248,6 @@ func (vm *VM) dropVar(name string) error {
 	}
 	vm.Mem.free(ptr)
 	delete(vm.Vars, name)
-	return nil
-}
-
-func (vm *VM) irUpdaterInt64(data int64, ins Instruction) error {
-	// 更新 data
-	ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[1], data)
-	if !ok {
-		// 更新 ok 为 false
-		ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
-		if !ok {
-			// 更新 ok 时 false
-			return &ErrUpdateVarBySurfaceInt64{
-				VarName: ins.ArgIdentifier[2],
-				Surface: 0,
-			}
-		}
-	}
-	// 更新 ok 为 true
-	ok = vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 1)
-	if !ok {
-		// 更新 ok 时 false
-		return &ErrUpdateVarBySurfaceInt64{
-			VarName: ins.ArgIdentifier[2],
-			Surface: 1,
-		}
-	}
-	return nil
-}
-
-func (vm *VM) irUpdaterBytes(data []byte, ins Instruction) error {
-	// 更新 data
-	ok := vm.updateVarBySurfaceBytes(ins.ArgIdentifier[1], data)
-	if !ok {
-		// 更新 ok 为 false
-		ok := vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 0)
-		if !ok {
-			// 更新 ok 时 false
-			return &ErrUpdateVarBySurfaceInt64{
-				VarName: ins.ArgIdentifier[2],
-				Surface: 0,
-			}
-		}
-	}
-	// 更新 ok 为 true
-	ok = vm.updateVarBySurfaceInt64(ins.ArgIdentifier[2], 1)
-	if !ok {
-		// 更新 ok 时 false
-		return &ErrUpdateVarBySurfaceInt64{
-			VarName: ins.ArgIdentifier[2],
-			Surface: 1,
-		}
-	}
 	return nil
 }
 
@@ -1282,7 +1270,7 @@ func (vm *VM) arithmeticPrepare(ins Instruction, opName string) (int64, int64, e
 		return 0, 0, &ErrArithmetic{Operation: opName, Err: &ErrOperandType{Operation: opName, Detail: fmt.Sprintf("sum var '%s' is int64", ins.ArgIdentifier[2])}}
 	}
 	// 必须是已存在的 int64 变量
-	_, ok := vm.getInt64Var(ins.ArgIdentifier[2])
+	_, ok := vm.getInt64VarPub(ins.ArgIdentifier[2])
 	if !ok {
 		return 0, 0, &ErrArithmetic{Operation: opName, Err: &ErrVarNotFound{Name: ins.ArgIdentifier[2]}}
 	}
@@ -1308,7 +1296,7 @@ func (vm *VM) extractBytesForEq(ins Instruction) ([]byte, []byte, error) {
 		return nil, nil, &ErrArithmetic{Operation: "eq_bytes", Err: &ErrOperandType{Operation: "eq_bytes", Detail: fmt.Sprintf("sum var '%s' is int64", ins.ArgIdentifier[2])}}
 	}
 	// 必须是已存在的 int64 变量
-	_, ok := vm.getInt64Var(ins.ArgIdentifier[2])
+	_, ok := vm.getInt64VarPub(ins.ArgIdentifier[2])
 	if !ok {
 		return nil, nil, &ErrArithmetic{Operation: "eq_bytes", Err: &ErrVarNotFound{Name: ins.ArgIdentifier[2]}}
 	}
@@ -1328,24 +1316,7 @@ func (vm *VM) getInt64Arg(identifier string) (int64, error) {
 		return num, nil
 	}
 	// 从变量中读取
-	num, ok := vm.getInt64Var(identifier)
-	if !ok {
-		return 0, &ErrVarNotFound{Name: identifier}
-	}
-	return num, nil
-}
-
-func (vm *VM) getInt64ArgExcludeSurface(identifier string) (int64, error) {
-	// 检查是否为 []byte 字面量（以单引号包围）
-	if len(identifier) >= 2 && identifier[0] == '\'' && identifier[len(identifier)-1] == '\'' {
-		return 0, &ErrOperandType{Operation: "getInt64ArgExcludeSurface", Detail: fmt.Sprintf("var '%s' is surface []byte", identifier)}
-	}
-	// 尝试解析为十进制 int64
-	if _, err := strconv.ParseInt(identifier, 10, 64); err == nil {
-		return 0, &ErrOperandType{Operation: "getInt64ArgExcludeSurface", Detail: fmt.Sprintf("var '%s' is surface int64", identifier)}
-	}
-	// 从变量中读取
-	num, ok := vm.getInt64Var(identifier)
+	num, ok := vm.getInt64VarPub(identifier)
 	if !ok {
 		return 0, &ErrVarNotFound{Name: identifier}
 	}
@@ -1364,26 +1335,7 @@ func (vm *VM) getBytesArg(identifier string) ([]byte, error) {
 		return nil, &ErrOperandType{Operation: "getBytesArg", Detail: fmt.Sprintf("var '%s' is int64", identifier)}
 	}
 	// 从变量中读取
-	b, ok := vm.getBytesVar(identifier)
-	if !ok {
-		return nil, &ErrVarNotFound{Name: identifier}
-	}
-	return b, nil
-}
-
-// getBytesArgExcludeSurface 尝试从 identifier 中提取 []byte 值，排除表面变量。
-func (vm *VM) getBytesArgExcludeSurface(identifier string) ([]byte, error) {
-	// 检查是否为 []byte 字面量
-	if len(identifier) >= 2 && identifier[0] == '\'' && identifier[len(identifier)-1] == '\'' {
-		return nil, nil
-	}
-	// 检查是否为 int64 字面量
-	_, err := strconv.ParseInt(identifier, 10, 64)
-	if err == nil {
-		return nil, &ErrOperandType{Operation: "getBytesArg", Detail: fmt.Sprintf("var '%s' is int64", identifier)}
-	}
-	// 从变量中读取
-	b, ok := vm.getBytesVar(identifier)
+	b, ok := vm.getBytesVarPub(identifier)
 	if !ok {
 		return nil, &ErrVarNotFound{Name: identifier}
 	}

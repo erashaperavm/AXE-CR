@@ -44,6 +44,14 @@ func (e *ErrUnsupportedPtrKind) Error() string {
 	return fmt.Sprintf("unsupported ptr kind: %v", e.Kind)
 }
 
+type ErrPrivacyMemUpdateInNoCallIns struct {
+	ThisIns string
+}
+
+func (e *ErrPrivacyMemUpdateInNoCallIns) Error() string {
+	return fmt.Sprintf("privacy mem update is unsupported in: %s, but call instruction", e.ThisIns)
+}
+
 // ============== Block/Label Errors ==============
 
 // ErrLabelNotFound indicates a label was not found in the Blocks map.
@@ -187,6 +195,16 @@ type ErrUnsupportedInputType struct {
 
 func (e *ErrUnsupportedInputType) Error() string {
 	return fmt.Sprintf("call_rs: input %d for '%s' unsupported type '%s'", e.InputIndex, e.FuncName, e.InputType)
+}
+
+type ErrUnsupportedOutputType struct {
+	FuncName    string
+	OutputIndex int
+	OutputType  string
+}
+
+func (e *ErrUnsupportedOutputType) Error() string {
+	return fmt.Sprintf("call_rs: output %d for '%s' unsupported type '%s'", e.OutputIndex, e.FuncName, e.OutputType)
 }
 
 // ============== Operand & Arithmetic Errors ==============
