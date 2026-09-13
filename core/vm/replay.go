@@ -3,30 +3,41 @@ package vm
 import (
 	"bytes"
 	"errors"
+	"fmt"
 )
 
-func NewReplayVM(code []Instruction, env *Environment) *VM {
+func NewReplayVM(
+	code []Instruction,
+	originPos map[int64]map[int64]TokenPos,
+	env *Environment,
+	pubIn PublicInput,
+	privIn PrivateInput,
+	privInExpr []PrivateInputExpr,
+	traces map[int64]TraceStep,
+	isolationMem *IsolationMemory,
+) *VM {
 	return &VM{
-		Code:      code,
-		PC:        0,
-		Lines:     0,
-		Mem:       NewMemoryObj(),
-		PreMem:    NewMemoryObj(),
-		Vars:      make(map[string]Ptr),
-		PreVars:   make(map[string]Ptr),
-		Blocks:    make(map[int64]Block),
-		PreBlocks: make(map[int64]Block),
-		Env:       env,
-		TraceMode: true,
-		Traces:    make(map[int64]TraceStep),
-		OriginPos: make(map[int64]map[int64]TokenPos),
+		Code:         code,
+		OriginPos:    originPos,
+		TraceMode:    true,
+		Env:          env,
+		PubIn:        pubIn,
+		PrivIn:       privIn,
+		PrivInExpr:   privInExpr,
+		PC:           0,
+		Lines:        0,
+		Mem:          NewMemoryObj(),
+		Vars:         make(map[string]Ptr),
+		Blocks:       make(map[int64]Block),
+		IsolationMem: isolationMem,
+		Traces:       traces,
 	}
 }
 
-// Replay 回放 VM 执行轨迹, 需要一个新 VM 实例和一个新内存状态
-func (vm *VM) Replay() error {
+// Replay 回放 VM 执行轨迹, 需要一个新 VM 实例和一个新内存状态, 返回不一致错误类型和错误位置
+func (vm *VM) Replay() (error, []TokenPos) {
 	if !vm.TraceMode {
-		return nil
+		return nil, []TokenPos{}
 	}
 
 	// 同步内存状态
@@ -43,20 +54,62 @@ func (vm *VM) Replay() error {
 
 		switch ins.Op {
 		case OP_READ:
-			// todo bridge read hash compute
+			// todo：复杂度原因暂时禁用 RW 操作
+
 			vm.PC++
+			vm.Lines++
 
 		case OP_INPUT:
-			// todo bridge input hash compute
+			// 开头标志性语句，无实际语义
+
 			vm.PC++
+			vm.Lines++
 
 		case OP_WRITE:
-			// todo bridge write hash compute
+			// todo：复杂度原因暂时禁用 RW 操作
+
 			vm.PC++
+			vm.Lines++
 
 		case OP_OUTPUT:
-			// todo bridge output hash compute
+			// 公共输出由重放计算逻辑保证，隐私输出由 zkp 保证，这里需要确认上一步（还没有output的line）的输出变量和写入的是否一样
+
+			for i, varName := range ins.ArgIdentifier[1:] {
+				// 判断是否为 surface
+				if isSurfaceInt64(varName) {
+					sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
+					return &ErrExecShouldFoundItUnmatchMemType{VarName: varName, Got: "surface int64", Expect: "PubStack or PubHeap (Pub: int64 or bytes)"}, []TokenPos{sourcePos}
+				}
+				if isSurfaceBytes(varName) {
+					sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
+					return &ErrExecShouldFoundItUnmatchMemType{VarName: varName, Got: "surface bytes", Expect: "PubStack or PubHeap (Pub: int64 or bytes)"}, []TokenPos{sourcePos}
+				}
+
+				// 判断是否为 Priv 和 Isolation Memory
+				if vm.Vars[varName].Kind == PrivStack || vm.Vars[varName].Kind == PrivHeap || vm.Vars[varName].Kind == IsolationHeap || vm.Vars[varName].Kind == IsolationStack {
+					sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
+					return &ErrExecShouldFoundItUnmatchMemType{VarName: varName, Got: "Priv or Isolation", Expect: "PubStack or PubHeap (Pub: int64 or bytes)"}, []TokenPos{sourcePos}
+				}
+
+				// 获取重定向后的名称，以及原始指针
+				varNameThis := fmt.Sprintf("__internal_pub_out_%d", i)
+				ptrOfOrig := vm.Vars[varName]
+
+				// 读取写入的 IsolationMem 对比上一帧内存对应变量 eq
+				switch ptrOfOrig.Kind {
+				case PubStack:
+					contentFromIsolationMem, ok := vm.IsolationMem.readStackOnlyForReplay(vm.Vars[varNameThis])
+					if !ok {
+						sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
+						return &ErrIsolationMemInaccessible{VarName: varNameThis}, []TokenPos{sourcePos}
+					}
+
+				}
+
+			}
+
 			vm.PC++
+			vm.Lines++
 
 		case OP_ALLOC:
 			// 纯内存变更, 不处理

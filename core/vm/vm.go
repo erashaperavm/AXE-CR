@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 )
 
@@ -24,15 +25,6 @@ type VM struct {
 	// 隐私输入表示
 	PrivInExpr []PrivateInputExpr
 
-	// 公共输出
-	PubOut PublicOutput
-
-	// 隐私输出
-	PrivOut []PrivateOutput
-
-	// 隐私输出表示
-	PrivOutExpr []PrivateOriginOutputExpr
-
 	PC    int64 // 第几行了
 	Lines int64 // 真实执行命令函数行数
 
@@ -45,7 +37,8 @@ type VM struct {
 	Blocks    map[int64]Block // 代码标记块
 	PreBlocks map[int64]Block // 上一帧的代码标记块
 
-	PrivacyMem *PrivacyMemory // 隐私内存，用于存储隐私数据，不暴露给验证者，只能直接输入 zkVM
+	PrivacyMem   *PrivacyMemory   // 隐私内存，用于存储隐私数据，不暴露给验证者，只能直接输入 zkVM
+	IsolationMem *IsolationMemory // 隔离内存，用于存储程序不可访问内容，如 report 等
 
 	Traces map[int64]TraceStep // 执行轨迹, vm.Traces[vm.Lines]
 
@@ -54,38 +47,34 @@ type VM struct {
 // NewExecuteVM 创建一个 VM，初始化内存与变量表
 func NewExecuteVM(
 	code []Instruction,
+	originPos map[int64]map[int64]TokenPos,
 	env *Environment,
 	debug bool,
 	traceMode bool,
 	pubIn PublicInput,
 	privIn PrivateInput,
 	privInExpr []PrivateInputExpr,
-	pubOut PublicOutput,
-	privOut []PrivateOutput,
-	privOutExpr []PrivateOriginOutputExpr,
 ) *VM {
 	return &VM{
-		Code:        code,
-		OriginPos:   make(map[int64]map[int64]TokenPos),
-		DebugMode:   debug,
-		TraceMode:   traceMode,
-		Env:         env,
-		PubIn:       pubIn,
-		PrivIn:      privIn,
-		PrivInExpr:  privInExpr,
-		PubOut:      pubOut,
-		PrivOut:     privOut,
-		PrivOutExpr: privOutExpr,
-		PC:          0,
-		Lines:       0,
-		Mem:         NewMemoryObj(),
-		PreMem:      NewMemoryObj(),
-		PrivacyMem:  NewPrivacyMemoryObj(),
-		Vars:        make(map[string]Ptr),
-		PreVars:     make(map[string]Ptr),
-		Blocks:      make(map[int64]Block),
-		PreBlocks:   make(map[int64]Block),
-		Traces:      make(map[int64]TraceStep),
+		Code:         code,
+		OriginPos:    originPos,
+		DebugMode:    debug,
+		TraceMode:    traceMode,
+		Env:          env,
+		PubIn:        pubIn,
+		PrivIn:       privIn,
+		PrivInExpr:   privInExpr,
+		PC:           0,
+		Lines:        0,
+		Mem:          NewMemoryObj(),
+		PreMem:       NewMemoryObj(),
+		Vars:         make(map[string]Ptr),
+		PreVars:      make(map[string]Ptr),
+		Blocks:       make(map[int64]Block),
+		PreBlocks:    make(map[int64]Block),
+		PrivacyMem:   NewPrivacyMemoryObj(),
+		IsolationMem: NewIsolationMemoryObj(),
+		Traces:       make(map[int64]TraceStep),
 	}
 }
 
@@ -115,41 +104,36 @@ func (vm *VM) Run() (error, []TokenPos) {
 		_ = vm.allocVar(name, PrivStack, 0)
 		vm.updateVarBySurfaceInt64Priv(name, privIn)
 	}
-	// 处理隐私输入内存表示
+	// 处理隐私输入内存表示（同时表示公共+隐私）
 	for i, privIn := range vm.PrivInExpr {
-		name := fmt.Sprintf("__internal_priv_in_expr_%d", i)
+		name := fmt.Sprintf("__internal_expr_%d", i)
 		_ = vm.allocVar(name, PrivHeap, 32)
 		vm.updateVarBySurfaceBytesPub(name, privIn.HashSum[:])
-	}
-	// 创建公共输出变量 bytes
-	for i, pubOut := range vm.PubOut.Bytes {
-		name := fmt.Sprintf("__internal_pub_out_%d", i)
-		_ = vm.allocVar(name, PubHeap, int64(len(pubOut)))
-	}
-	// 创建公共输出变量 int64
-	for i, _ := range vm.PubOut.Int64 {
-		name := fmt.Sprintf("__internal_pub_out_%d", i)
-		_ = vm.allocVar(name, PubStack, 0)
-	}
-	// 隐私加密输出由于未知 size,暂时不初始化内存
-
-	// 创建隐私输出内存表示
-	for i, _ := range vm.PrivOutExpr {
-		name := fmt.Sprintf("__internal_priv_out_expr_%d", i)
-		_ = vm.allocVar(name, PubHeap, 32)
 	}
 
 	for vm.PC < int64(len(vm.Code)) {
 		ins := vm.Code[vm.PC]
 
 		if vm.DebugMode {
-			fmt.Println(fmt.Sprintf("")) // todo
+			// todo
 		}
 
 		if vm.TraceMode {
 			vm.PreMem = vm.Mem.copy()
 			vm.PreVars = vm.copyVars()
 			vm.PreBlocks = vm.copyBlocks()
+		}
+
+		// 检查是否最后一行了
+		if vm.PC == int64(len(vm.Code)-1) {
+			// 创建输出
+			// todo
+		}
+
+		// 先检查参数和类型数量匹配
+		if len(ins.ArgType) != len(ins.ArgIdentifier) {
+			sourcePos := vm.OriginPos[vm.PC][0]
+			return &ErrTypeArgNumMismatch{GetType: len(ins.ArgType), GetArg: len(ins.ArgIdentifier)}, []TokenPos{sourcePos}
 		}
 
 		// todo : fmt 和 types 由 compiler 保证
@@ -330,11 +314,69 @@ func (vm *VM) Run() (error, []TokenPos) {
 				OP_OUTPUT -> MAIN INS
 
 				int64
-				var_name
+				var_name,
+				var_name,
+				...
 
-				idx -> 输出参数第几个
-				varname-> 使用变量来存储将要输出的数据
+				num -> 输出几个公共输出参数
+				varname-> 使用变量来存储将要输出的数据，公共内存; 隐私表示和隐私内存在独立内存分区中，不需要手动输出
+				varname
+				...
 			*/
+
+			for i, varName := range ins.ArgIdentifier[1:] {
+				// 判断是否为 surface
+				if isSurfaceInt64(varName) {
+					sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
+					return &ErrOutputIsSurface{VarName: varName}, []TokenPos{sourcePos}
+				}
+				if isSurfaceBytes(varName) {
+					sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
+					return &ErrOutputIsSurface{VarName: varName}, []TokenPos{sourcePos}
+				}
+
+				// 判断是否为 Priv 和 Isolation Memory
+				if vm.Vars[varName].Kind == PrivStack || vm.Vars[varName].Kind == PrivHeap || vm.Vars[varName].Kind == IsolationHeap || vm.Vars[varName].Kind == IsolationStack {
+					sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
+					return &ErrOutputIsSurface{VarName: varName}, []TokenPos{sourcePos}
+				}
+
+				// 重定向为新名称，并为新名称分配变量、内存
+				varNameThis := fmt.Sprintf("__internal_pub_out_%d", i)
+				ptrOfOrig := vm.Vars[varName]
+				var contentBytes []byte
+				var contentNum int64
+				var ok bool
+				switch ptrOfOrig.Kind {
+				case PubStack:
+					contentNum, ok = vm.getInt64VarPub(varName)
+					if !ok {
+						sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
+						return &ErrVarNotFound{Name: varName}, []TokenPos{sourcePos}
+					}
+					ptr := vm.allocVar(varNameThis, IsolationStack, 0)
+					ok = vm.IsolationMem.writeStack(contentNum, ptr)
+					if !ok {
+						sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
+						return &ErrUpdateVarBySurfaceInt64{VarName: varName}, []TokenPos{sourcePos}
+					}
+				case PubHeap:
+					contentBytes, ok = vm.getBytesVarPub(varName)
+					if !ok {
+						sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
+						return &ErrVarNotFound{Name: varName}, []TokenPos{sourcePos}
+					}
+					ptr := vm.allocVar(varNameThis, IsolationHeap, int64(len(contentBytes)))
+					ok = vm.IsolationMem.writeHeap(contentBytes, ptr)
+					if !ok {
+						sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
+						return &ErrUpdateVarBySurfaceBytes{VarName: varName}, []TokenPos{sourcePos}
+					}
+				default:
+					sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
+					return &ErrTypeArgNumMismatch{GetType: int(ptrOfOrig.Kind), GetArg: 1}, []TokenPos{sourcePos}
+				}
+			}
 
 			vm.PC++
 			vm.Lines++
@@ -429,6 +471,19 @@ func (vm *VM) Run() (error, []TokenPos) {
 					// Priv 数据修改只允许在 Call 分支中处理
 					sourcePos := vm.OriginPos[vm.PC][3]
 					return &ErrPrivacyMemUpdateInNoCallIns{ThisIns: "update"}, []TokenPos{sourcePos}
+				case IsolationHeap:
+					// IsolationHeap 数据修改只允许用 Heap 类型数据替代
+					sourcePos := vm.OriginPos[vm.PC][3]
+					return &ErrTypeMismatch{
+						Expected: "IsolationHeap",
+						Got:      "PubHeap",
+					}, []TokenPos{sourcePos}
+				case IsolationStack:
+					ok := vm.IsolationMem.writeStack(num, vm.Vars[ins.ArgIdentifier[0]])
+					if !ok {
+						sourcePos := vm.OriginPos[vm.PC][3]
+						return &ErrUpdateVarBySurfaceInt64{VarName: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
+					}
 				}
 			case surfaceBytes:
 				switch vm.Vars[ins.ArgIdentifier[0]].Kind {
@@ -453,6 +508,19 @@ func (vm *VM) Run() (error, []TokenPos) {
 					// Priv 数据修改只允许在 Call 分支中处理
 					sourcePos := vm.OriginPos[vm.PC][3]
 					return &ErrPrivacyMemUpdateInNoCallIns{ThisIns: "update"}, []TokenPos{sourcePos}
+				case IsolationHeap:
+					// IsolationHeap 数据修改只允许用 Heap 类型数据替代
+					sourcePos := vm.OriginPos[vm.PC][3]
+					return &ErrTypeMismatch{
+						Expected: "IsolationHeap",
+						Got:      "PubHeap",
+					}, []TokenPos{sourcePos}
+				case IsolationStack:
+					ok := vm.IsolationMem.writeHeap(byt, vm.Vars[ins.ArgIdentifier[0]])
+					if !ok {
+						sourcePos := vm.OriginPos[vm.PC][3]
+						return &ErrUpdateVarBySurfaceBytes{VarName: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
+					}
 				}
 			case identifier:
 				ok := vm.updateVarByIdentifier(ins.ArgIdentifier[0], ins.ArgIdentifier[1])
@@ -895,173 +963,265 @@ func (vm *VM) Run() (error, []TokenPos) {
 			// 此处个数不定，为了简化，出错位置统一定位在 call... 关键字
 			sourcePosCall := vm.OriginPos[vm.PC][0]
 
-			// ============================================================
-			// Step 1: 获取函数运行要求
-			// ============================================================
+			// 匹配 "__internal_数字" 在字符串末尾, 这是编译器用于判定统一函数调用次数
+			re := regexp.MustCompile(`__internal_(\d+)$`)
+			matches := re.FindStringSubmatch(ins.ArgIdentifier[0])
 
-			// todo 从这开始继续改，要求结构体也该
-			funName := ins.ArgIdentifier[0]
-			funReq, ok := vm.Env.Funcs[funName]
-			if !ok {
-				return &ErrFuncNotFound{Name: funName}, []TokenPos{sourcePosCall}
+			if len(matches) < 2 {
+				// 没有匹配到，返回原字符串和错误
+				return &ErrFuncNameInvalid{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePosCall}
 			}
 
-			// ============================================================
-			// Step 2: 检查输入个数要求，检查输入输出类型要求
-			//         约定：前面全部是 int64，后面全是 bytes
-			//         限制：输入必须来自隐私 privmem 内存地址
-			// ============================================================
-
-			// 2a. 解析并校验输入/输出个数
-			inNumStr := ins.ArgIdentifier[1]
-			outNumStr := ins.ArgIdentifier[2]
-			inNum, err := vm.getInt64Arg(inNumStr)
+			// 提取数字
+			funCallIdx, err := strconv.Atoi(matches[1])
 			if err != nil {
-				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("invalid inNum '%s': %v", inNumStr, err)}, []TokenPos{sourcePosCall}
-			}
-			if inNum != int64(len(funReq.ReqInput)) {
-				return &ErrFuncInputCount{Name: funName, Expected: len(funReq.ReqInput), Got: int(inNum)}, []TokenPos{sourcePosCall}
-			}
-			outNum, err := vm.getInt64Arg(outNumStr)
-			if err != nil {
-				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("invalid outNum '%s': %v", outNumStr, err)}, []TokenPos{sourcePosCall}
-			}
-			if outNum != int64(len(funReq.ReqOutput)) {
-				return &ErrFuncOutputCount{Name: funName, Expected: len(funReq.ReqOutput), Got: int(outNum)}, []TokenPos{sourcePosCall}
+				return &ErrFuncNameInvalid{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePosCall}
 			}
 
-			// 2b. 校验 ReqInput 遵循约定：前面全是 int64，后面全是 bytes
-			seenBytes := false
-			for i, t := range funReq.ReqInput {
-				switch t {
-				case "int64":
-					if seenBytes {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' ReqInput[%d]: int64 must not appear after bytes", funName, i)}, []TokenPos{sourcePosCall}
+			// 删除后缀，返回剩余部分
+			funName := re.ReplaceAllString(ins.ArgIdentifier[0], "")
+
+			// 获取函数运行要求
+			req := vm.Env.Funcs[ins.ArgIdentifier[0]]
+			if req == nil {
+				return &ErrFuncNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePosCall}
+			}
+
+			// 检查参数是否符合前 int64 后 bytes
+			nowBytes := false
+			var splitPoint int
+			for i, a := range ins.ArgIdentifier {
+				if isSurfaceInt64(a) {
+					// refuse surface int64 as param
+					return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("param %d is surface int64", i)}, []TokenPos{sourcePosCall}
+				}
+				if isSurfaceBytes(a) {
+					// refuse surface bytes as param
+					return &ErrOperandType{
+						Operation: "call_rs",
+						Detail:    fmt.Sprintf("param %d is surface bytes", i),
+					}, []TokenPos{sourcePosCall}
+				}
+
+				switch nowBytes {
+				case true:
+					// 已经有 bytes ，必须是 bytes
+					_, ok := vm.getBytesVarPriv(a)
+					if !ok {
+						return &ErrTypeMismatch{
+							Expected: "priv int64 or bytes",
+							Got:      "pub int64 or bytes",
+						}, []TokenPos{sourcePosCall}
 					}
-				case "bytes":
-					seenBytes = true
-				default:
-					return &ErrUnsupportedInputType{FuncName: funName, InputIndex: i, InputType: t}, []TokenPos{sourcePosCall}
+					continue
+				case false:
+					// now ensure it is variable
+					// get it via privmem visit method
+					// we try int64 first
+					_, ok := vm.getInt64VarPriv(a)
+					if !ok {
+						// try bytes
+						_, ok := vm.getBytesVarPriv(a)
+						if !ok {
+							return &ErrTypeMismatch{
+								Expected: "priv int64 or bytes",
+								Got:      "pub int64 or bytes",
+							}, []TokenPos{sourcePosCall}
+						}
+
+						// bytes
+						splitPoint = i
+						nowBytes = true
+					}
+					// int64
+					continue
 				}
 			}
 
-			// 2c. 校验 ReqOutput 遵循约定：前面全是 int64，后面全是 bytes
-			seenBytes = false
-			for i, t := range funReq.ReqOutput {
-				switch t {
-				case "int64":
-					if seenBytes {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' ReqOutput[%d]: int64 must not appear after bytes", funName, i)}, []TokenPos{sourcePosCall}
+			// 检查参数(没有输出参数，因为它是隐私内存，不需要显式赋值)是否符合函数调用要求
+			for i, r := range req.ReqInput {
+				kind := vm.Vars[ins.ArgIdentifier[i+1]].Kind // 第一个参数是函数名
+				if r == "bytes" {
+					// require for bytes
+					if kind != PrivHeap {
+						return &ErrTypeMismatch{
+							Expected: "priv bytes",
+							Got:      fmt.Sprintf("%s", kind),
+						}, []TokenPos{sourcePosCall}
 					}
-				case "bytes":
-					seenBytes = true
-				default:
-					return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' unsupported output type '%s'", funName, t)}, []TokenPos{sourcePosCall}
+					continue
+				} else if r == "int64" {
+					// require for int64
+					if kind != PrivStack {
+						return &ErrTypeMismatch{
+							Expected: "priv int64",
+							Got:      fmt.Sprintf("%s", kind),
+						}, []TokenPos{sourcePosCall}
+					}
+					continue
+				} else {
+					return &ErrTypeMismatch{
+						Expected: "priv int64 or bytes",
+						Got:      fmt.Sprintf("%s", kind),
+					}, []TokenPos{sourcePosCall}
 				}
 			}
 
-			// 2d. 收集输出变量名并校验（必须是已存在的隐私变量，不能是字面值）
-			argStrs := ins.ArgIdentifier[3:]
-			outputVarNames := make([]string, outNum)
-			for idx, argStr := range argStrs {
-				if int64(idx) >= inNum {
-					outIdx := int64(idx) - inNum
-					// 不能是字面值
-					if len(argStr) >= 2 && argStr[0] == '\'' && argStr[len(argStr)-1] == '\'' {
-						return &ErrFuncOutputNotVar{FuncName: funName, OutputIndex: int(outIdx)}, []TokenPos{sourcePosCall}
-					}
-					if _, err := strconv.ParseInt(argStr, 10, 64); err == nil {
-
-						return &ErrFuncOutputNotVar{FuncName: funName, OutputIndex: int(outIdx)}, []TokenPos{sourcePosCall}
-					}
-					// 变量必须存在且类型匹配
-					ptr, exists := vm.Vars[argStr]
-					if !exists {
-						return &ErrVarNotFound{Name: argStr}, []TokenPos{sourcePosCall}
-					}
-					expectedType := funReq.ReqOutput[outIdx]
-					if expectedType == "int64" && ptr.Kind != PrivStack {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects int64 but variable '%s' is not stack", outIdx, funName, argStr)}, []TokenPos{sourcePosCall}
-					}
-					if expectedType == "bytes" && ptr.Kind != PrivHeap {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("output %d for '%s' expects bytes but variable '%s' is not heap", outIdx, funName, argStr)}, []TokenPos{sourcePosCall}
-					}
-					outputVarNames[outIdx] = argStr
+			// 解析参数
+			int64Slice := make([]int64, splitPoint-1)
+			for i, content := range ins.ArgIdentifier[1 : splitPoint+1] {
+				num, err := strconv.ParseInt(content, 10, 64)
+				if err != nil {
+					return &ErrOperandType{
+						Operation: "call_rs",
+						Detail:    fmt.Sprintf("param %d is not int64", i),
+					}, []TokenPos{sourcePosCall}
 				}
+				int64Slice[i-1] = num
+				continue
+			}
+			bytesSlice := make([][]byte, len(ins.ArgIdentifier)-splitPoint)
+			for i, content := range ins.ArgIdentifier[splitPoint+1:] {
+				bytesSlice[i-splitPoint] = []byte(content)
+				continue
 			}
 
-			// ============================================================
-			// Step 3: 构建输入并调用函数
-			// ============================================================
-			ints := make([]int64, 0, inNum)
-			rawBytes := make([][]byte, 0, inNum)
-
-			for idx, argStr := range argStrs {
-				if int64(idx) >= inNum {
-					break
-				}
-				switch funReq.ReqInput[idx] {
-				case "int64":
-					num, err := vm.getInt64Arg(argStr)
-					if err != nil {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("input %d for '%s': %v", idx, funName, err)}, []TokenPos{sourcePosCall}
-					}
-					ints = append(ints, num)
-				case "bytes":
-					b, err := vm.getBytesArg(argStr)
-					if err != nil {
-						return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("input %d for '%s': %v", idx, funName, err)}, []TokenPos{sourcePosCall}
-					}
-					rawBytes = append(rawBytes, b)
-				}
-			}
-
-			resultFilePath, err := vm.Env.CallRS(funName, ints, rawBytes)
+			// 运行函数
+			result, err := vm.Env.CallRS(funName, int64Slice, bytesSlice)
 			if err != nil {
-				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("func '%s' failed: %v", funName, err)}, []TokenPos{sourcePosCall}
+				return &ErrCallFunctionFailed{
+					FunName:  ins.ArgIdentifier[0],
+					Detailed: fmt.Sprintf("%v", err),
+				}, []TokenPos{sourcePosCall}
 			}
 
-			hexData, err := os.ReadFile(resultFilePath.PvPath)
+			// 解析文件
+			// 读取公共输出（公共内存）、加密输出（隐私内存）、原结果承诺（隐私内存表示，公共内存）
+			pvContent, err := os.ReadFile(result.PvPath)
 			if err != nil {
-				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("read '%s' failed: %v", resultFilePath, err)}, []TokenPos{sourcePosCall}
+				return &ErrReadFileFailed{
+					Path:     result.PvPath,
+					Detailed: fmt.Sprintf("Failed to read pv file: %v", err),
+				}, []TokenPos{sourcePosCall}
 			}
-
-			res, err := utils.SerializeSP1output(string(hexData))
+			// 解析
+			parseRes, err := utils.SerializeSP1output(string(pvContent))
 			if err != nil {
-				return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("parse '%s' failed: %v", resultFilePath, err)}, []TokenPos{sourcePosCall}
+				return &ErrParsePvFailed{
+					Path:     result.PvPath,
+					Detailed: fmt.Sprintf("Failed to parse pv file: %v", err),
+				}, []TokenPos{sourcePosCall}
 			}
-
-			// ============================================================
-			// Step 4: 获取函数公共输出写入变量
-			//         获取函数加密隐私输出写入变量
-			//		   获取函数隐私内存哈希计算结果写入变量
-			// ============================================================
-
-			publicOut := res.FirstCommit
-			hashOut := res.ThirdCommit
-			for i, v := range publicOut.Values {
-				switch v.Type {
+			// 加载到内存中
+			// 公共输出（第一次 commit）
+			pubOutsFroCall := parseRes.FirstCommit
+			for i, val := range pubOutsFroCall.Values {
+				varNameThis := fmt.Sprintf("__internal_%s_%d_pub_out_%d", funName, funCallIdx, i)
+				switch val.Type {
 				case utils.TypeInt64:
-					num, ok := v.Value.(int64)
+					_ = vm.allocVar(varNameThis, PubStack, 0)
+					n, ok := val.Value.(int64)
 					if !ok {
-						return &ErrTypeMismatch{Expected: "int64", Got: fmt.Sprintf("%T", v.Value)}, []TokenPos{sourcePosCall}
+						return &ErrCallInt64Assert{
+							VarName: varNameThis,
+							Surface: val.Value,
+						}, []TokenPos{sourcePosCall}
 					}
-					vm.updateVarBySurfaceInt64Priv(outputVarNames[i], num)
+					ok = vm.updateVarBySurfaceInt64Pub(varNameThis, n)
+					if !ok {
+						return &ErrUpdateVarBySurfaceInt64{
+							VarName: varNameThis,
+							Surface: n,
+						}, []TokenPos{sourcePosCall}
+					}
 				case utils.TypeBytes:
-					b, ok := v.Value.([]byte)
+					_ = vm.allocVar(varNameThis, PubHeap, int64(len(val.Value.([]byte))))
+					b, ok := val.Value.([]byte)
 					if !ok {
-						return &ErrTypeMismatch{Expected: "bytes", Got: fmt.Sprintf("%T", v.Value)}, []TokenPos{sourcePosCall}
+						return &ErrCallBytesAssert{
+							VarName: varNameThis,
+							Surface: val.Value,
+						}, []TokenPos{sourcePosCall}
 					}
-					vm.updateVarBySurfaceBytesPriv(outputVarNames[i], b)
+					ok = vm.updateVarBySurfaceBytesPub(varNameThis, b)
+					if !ok {
+						return &ErrUpdateVarBySurfaceBytes{
+							VarName: varNameThis,
+							Surface: b,
+						}, []TokenPos{sourcePosCall}
+					}
 				default:
-					return &ErrUnsupportedOutputType{FuncName: funName, OutputIndex: i, OutputType: strconv.Itoa(int(v.Type))}, []TokenPos{sourcePosCall}
+					return &ErrTypeMismatch{
+						Expected: "pub int64 or bytes",
+						Got:      fmt.Sprintf("%s", val.Type),
+					}, []TokenPos{sourcePosCall}
+				}
+			}
+			// 隐私输出（加密）
+			encOutsFroCall := parseRes.SecondCommit
+			for i, ct := range encOutsFroCall.EncryptedItems {
+				varNameThis := fmt.Sprintf("__internal_%s_%d_priv_out_%d", funName, funCallIdx, i)
+				_ = vm.allocVar(varNameThis, PrivHeap, int64(len(ct)))
+				ok := vm.updateVarBySurfaceBytesPriv(varNameThis, ct)
+				if !ok {
+					return &ErrUpdateVarBySurfaceBytes{
+						VarName: varNameThis,
+						Surface: ct,
+					}, []TokenPos{sourcePosCall}
+				}
+			}
+			// 验证结果承诺（隐私内存表示，公共内存）
+			exprOutsFroCall := parseRes.ThirdCommit
+			for i, val := range exprOutsFroCall.HashValues {
+				varNameThis := fmt.Sprintf("__internal_%s_%d_expr_%d", funName, funCallIdx, i)
+				_ = vm.allocVar(varNameThis, PubHeap, 0)
+				ok := vm.updateVarBySurfaceBytesPub(varNameThis, val[:])
+				if !ok {
+					return &ErrUpdateVarBySurfaceBytes{
+						VarName: varNameThis,
+						Surface: val[:],
+					}, []TokenPos{sourcePosCall}
 				}
 			}
 
-			encryptedOut := res.SecondCommit
-			for i, c := range encryptedOut.EncryptedItems {
-
+			// 读取 report 并加载到 IsolationHeap 中
+			reportContent, err := os.ReadFile(result.RpPath)
+			if err != nil {
+				return &ErrReadFileFailed{
+					Path:     result.RpPath,
+					Detailed: fmt.Sprintf("Failed to read report file: %v", err),
+				}, []TokenPos{sourcePosCall}
 			}
+			// 载入
+			varNameThis := fmt.Sprintf("__internal_%s_%d_report", funName, funCallIdx)
+			ptr := vm.allocVar(varNameThis, IsolationHeap, int64(len(reportContent)))
+			vm.IsolationMem.writeHeap(reportContent, ptr)
+
+			// 加载 proof 到 IsolationHeap 中
+			proofContent, err := os.ReadFile(result.PfPath)
+			if err != nil {
+				return &ErrReadFileFailed{
+					Path:     result.PfPath,
+					Detailed: fmt.Sprintf("Failed to read proof file: %v", err),
+				}, []TokenPos{sourcePosCall}
+			}
+			// 载入
+			varNameThis = fmt.Sprintf("__internal_%s_%d_proof", funName, funCallIdx)
+			ptr = vm.allocVar(varNameThis, IsolationHeap, int64(len(proofContent)))
+			vm.IsolationMem.writeHeap(proofContent, ptr)
+
+			// 加载 vkey 到 IsolationHeap 中
+			vkeyContent, err := os.ReadFile(result.VkeyPath)
+			if err != nil {
+				return &ErrReadFileFailed{
+					Path:     result.VkeyPath,
+					Detailed: fmt.Sprintf("Failed to read vkey file: %v", err),
+				}, []TokenPos{sourcePosCall}
+			}
+			// 载入
+			varNameThis = fmt.Sprintf("__internal_%s_%d_vkey", funName, funCallIdx)
+			ptr = vm.allocVar(varNameThis, IsolationHeap, int64(len(vkeyContent)))
+			vm.IsolationMem.writeHeap(vkeyContent, ptr)
 
 			vm.PC++
 			vm.Lines++
@@ -1108,6 +1268,8 @@ func (vm *VM) allocVar(name string, memType PtrKind, size int64) Ptr {
 		case PrivHeap:
 			// 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
 			ptr = vm.PrivacyMem.allocHeap(size)
+		case IsolationHeap:
+			ptr = vm.IsolationMem.allocHeap(size)
 		default:
 			panic(fmt.Sprintf("unsupported mem type: %v", memType))
 		}
@@ -1187,6 +1349,9 @@ func (vm *VM) updateVarByIdentifier(name string, valIdentifier string) bool {
 	case PrivHeap:
 		// 隐私内存不支持映射到公共内存
 		return false
+	case IsolationHeap:
+		// 隔离内存不支持映射到公共内存
+		return false
 	default:
 		panic(fmt.Sprintf("unsupported ptr kind: %v", dataPtr.Kind))
 	}
@@ -1253,6 +1418,7 @@ func (vm *VM) dropVar(name string) error {
 
 func (vm *VM) arithmeticPrepare(ins Instruction, opName string) (int64, int64, error) {
 	// 使用 getInt64Arg 提取前两个操作数（只接受变量，拒绝字面量）
+	// todo: 计划接受字面量，但目前不支持
 	aNum, err := vm.getInt64Arg(ins.ArgIdentifier[0])
 	if err != nil {
 		return 0, 0, &ErrArithmetic{Operation: opName, Err: err}
@@ -1303,19 +1469,27 @@ func (vm *VM) extractBytesForEq(ins Instruction) ([]byte, []byte, error) {
 	return aBytes, bBytes, nil
 }
 
+// isSurfaceBytes 判断 identifier 是否为 []byte 字面量（以单引号包围）。
+func isSurfaceBytes(identifier string) bool {
+	return len(identifier) >= 2 && identifier[0] == '\'' && identifier[len(identifier)-1] == '\''
+}
+
+// isSurfaceInt64 判断 identifier 是否为 int64 字面量（十进制）。
+func isSurfaceInt64(identifier string) bool {
+	_, err := strconv.ParseInt(identifier, 10, 64)
+	return err == nil
+}
+
 // getInt64Arg 尝试从 identifier 中提取 int64 值。
 // 若 identifier 为 []byte 字面量（'...'），则返回错误；
 // 否则尝试解析为十进制 int64，若失败则从变量中读取。
 func (vm *VM) getInt64Arg(identifier string) (int64, error) {
-	// 检查是否为 []byte 字面量（以单引号包围）
-	if len(identifier) >= 2 && identifier[0] == '\'' && identifier[len(identifier)-1] == '\'' {
+	if isSurfaceBytes(identifier) {
 		return 0, &ErrOperandType{Operation: "getInt64Arg", Detail: fmt.Sprintf("var '%s' is []byte", identifier)}
 	}
-	// 尝试解析为十进制 int64
 	if num, err := strconv.ParseInt(identifier, 10, 64); err == nil {
 		return num, nil
 	}
-	// 从变量中读取
 	num, ok := vm.getInt64VarPub(identifier)
 	if !ok {
 		return 0, &ErrVarNotFound{Name: identifier}
@@ -1325,16 +1499,12 @@ func (vm *VM) getInt64Arg(identifier string) (int64, error) {
 
 // getBytesArg 尝试从 identifier 中提取 []byte 值。
 func (vm *VM) getBytesArg(identifier string) ([]byte, error) {
-	// 检查是否为 []byte 字面量
-	if len(identifier) >= 2 && identifier[0] == '\'' && identifier[len(identifier)-1] == '\'' {
+	if isSurfaceBytes(identifier) {
 		return []byte(identifier), nil
 	}
-	// 检查是否为 int64 字面量
-	_, err := strconv.ParseInt(identifier, 10, 64)
-	if err == nil {
+	if isSurfaceInt64(identifier) {
 		return nil, &ErrOperandType{Operation: "getBytesArg", Detail: fmt.Sprintf("var '%s' is int64", identifier)}
 	}
-	// 从变量中读取
 	b, ok := vm.getBytesVarPub(identifier)
 	if !ok {
 		return nil, &ErrVarNotFound{Name: identifier}

@@ -23,26 +23,23 @@ type Environment struct {
 	// Output 验证加密 proof
 
 	// 数据区域
-	Funcs       map[string]config.FunctionMeta
-	InputTypes  map[int64]string
-	OutputTypes map[int64]string
-	ExeDir      string
-	WorkDir     string
-	Mode        string
+	Funcs   map[string]*config.FunctionMeta
+	ExeDir  string
+	WorkDir string
+	Mode    string
 }
 
 func NewEnvironment(
-	inputTypes,
-	outputTypes map[int64]string,
 	funcs map[string]config.FunctionMeta,
 	exeDir,
 	workDir,
 	mode string,
 ) *Environment {
 	e := &Environment{
-		InputTypes:  inputTypes,
-		OutputTypes: outputTypes,
-		Funcs:       funcs,
+		Funcs:   make(map[string]*config.FunctionMeta),
+		ExeDir:  exeDir,
+		WorkDir: workDir,
+		Mode:    mode,
 	}
 
 	e.ReadInt64 = func(dataPosOnChain []byte) (int64, error) {

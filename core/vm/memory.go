@@ -1,6 +1,8 @@
 package vm
 
-import "bytes"
+import (
+	"bytes"
+)
 
 // 地址分配器，初始地址从 0 开始
 var nextStackAddr int64 = 0
@@ -13,6 +15,17 @@ type Memory struct {
 
 // PrivacyMemory keeps a counter that ensures data can be only updated one time
 type PrivacyMemory struct {
+	Stack map[int64]struct {
+		Detail  int64
+		Counter int8
+	}
+	Heap map[int64]struct {
+		Detail  []byte
+		Counter int8
+	}
+}
+
+type IsolationMemory struct {
 	Stack map[int64]struct {
 		Detail  int64
 		Counter int8
@@ -36,6 +49,15 @@ func NewPrivacyMemoryObj() *PrivacyMemory {
 			Detail  int64
 			Counter int8
 		}),
+		Heap: make(map[int64]struct {
+			Detail  []byte
+			Counter int8
+		}),
+	}
+}
+
+func NewIsolationMemoryObj() *IsolationMemory {
+	return &IsolationMemory{
 		Heap: make(map[int64]struct {
 			Detail  []byte
 			Counter int8
@@ -273,4 +295,86 @@ func (m *PrivacyMemory) free(p Ptr) {
 	default:
 		panic("unimplemented ptr kind")
 	}
+}
+
+func (m *IsolationMemory) allocHeap(size int64) Ptr {
+	addr := nextHeapAddr
+	nextHeapAddr += size
+	m.Heap[addr] = struct {
+		Detail  []byte
+		Counter int8
+	}{Detail: make([]byte, size), Counter: 0}
+	return Ptr{Kind: IsolationHeap, Pointer: addr}
+}
+
+// readHeapOnlyForReplay func OnlyForReplay !!!
+func (m *IsolationMemory) readHeapOnlyForReplay(ptr Ptr) ([]byte, bool) {
+	if ptr.Kind != IsolationHeap {
+		return nil, false
+	}
+
+	b, ok := m.Heap[ptr.Pointer]
+	if !ok {
+		return nil, false
+	}
+
+	if b.Counter != 1 {
+		return nil, false
+	}
+
+	return b.Detail, true
+}
+
+func (m *IsolationMemory) writeHeap(data []byte, ptr Ptr) bool {
+	if ptr.Kind != IsolationHeap {
+		return false
+	}
+	_, ok := m.Heap[ptr.Pointer]
+	if !ok {
+		return false
+	}
+	if m.Heap[ptr.Pointer].Counter != 0 {
+		return false
+	}
+	m.Heap[ptr.Pointer] = struct {
+		Detail  []byte
+		Counter int8
+	}{Detail: data, Counter: 1}
+	return true
+}
+
+// readStackOnlyForReplay func OnlyForReplay !!!
+func (m *IsolationMemory) readStackOnlyForReplay(ptr Ptr) (int64, bool) {
+	if ptr.Kind != IsolationStack {
+		return 0, false
+	}
+
+	n, ok := m.Stack[ptr.Pointer]
+	if !ok {
+		return 0, false
+	}
+
+	if n.Counter != 1 {
+		return 0, false
+	}
+
+	return n.Detail, true
+}
+
+func (m *IsolationMemory) writeStack(data int64, ptr Ptr) bool {
+	if ptr.Kind != IsolationStack {
+		return false
+	}
+	_, ok := m.Stack[ptr.Pointer]
+	if !ok {
+		return false
+	}
+	if m.Stack[ptr.Pointer].Counter != 0 {
+		return false
+	}
+	m.Stack[ptr.Pointer] = struct {
+		Detail  int64
+		Counter int8
+	}{Detail: data, Counter: 1}
+	return true
 }

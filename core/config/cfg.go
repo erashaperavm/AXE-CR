@@ -20,7 +20,6 @@ type AxeProjectConfig struct {
 
 type FunctionMeta struct {
 	ReqInput     []string `json:"req_input"`
-	ReqOutput    []string `json:"req_output"`
 	TargetVerify string   `json:"target_verify"`
 }
 

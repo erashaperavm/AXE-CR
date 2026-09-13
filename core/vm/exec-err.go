@@ -14,6 +14,7 @@ type ErrPtrNotFound struct{ Name string }
 
 func (e *ErrPtrNotFound) Error() string { return fmt.Sprintf("ptr '%s' not found", e.Name) }
 
+// ErrVarDrop indicates a variable drop failed.
 type ErrVarDrop struct{ Name string }
 
 func (e *ErrVarDrop) Error() string { return fmt.Sprintf("variable '%s' dropped failed", e.Name) }
@@ -44,6 +45,7 @@ func (e *ErrUnsupportedPtrKind) Error() string {
 	return fmt.Sprintf("unsupported ptr kind: %v", e.Kind)
 }
 
+// ErrPrivacyMemUpdateInNoCallIns indicates a privacy memory update is unsupported in a non-call instruction.
 type ErrPrivacyMemUpdateInNoCallIns struct {
 	ThisIns string
 }
@@ -85,6 +87,16 @@ func (e *ErrBlockLabelInvalid) Error() string {
 
 // ============== Instruction Errors ==============
 
+// ErrTypeArgNumMismatch indicates a mismatch in the number of type and arguments.
+type ErrTypeArgNumMismatch struct {
+	GetType int
+	GetArg  int
+}
+
+func (e *ErrTypeArgNumMismatch) Error() string {
+	return fmt.Sprintf("type arg num mismatch: expected %d, got %d", e.GetType, e.GetArg)
+}
+
 // ErrUnknownOpcode indicates an unknown opcode.
 type ErrUnknownOpcode struct{ Opcode int }
 
@@ -99,6 +111,7 @@ func (e *ErrUnexpectedEnd) Error() string {
 	return fmt.Sprintf("unexpected end: with label '%s'", e.Label)
 }
 
+// ErrUpdateVarBySurfaceInt64 indicates a variable update by surface int64 failed.
 type ErrUpdateVarBySurfaceInt64 struct {
 	VarName string
 	Surface int64
@@ -108,6 +121,7 @@ func (e *ErrUpdateVarBySurfaceInt64) Error() string {
 	return fmt.Sprintf("update var '%s' by surface int64 '%d' failed", e.VarName, e.Surface)
 }
 
+// ErrUpdateVarBySurfaceBytes indicates a variable update by surface bytes failed.
 type ErrUpdateVarBySurfaceBytes struct {
 	VarName string
 	Surface []byte
@@ -117,35 +131,43 @@ func (e *ErrUpdateVarBySurfaceBytes) Error() string {
 	return fmt.Sprintf("update var '%s' by surface bytes '%v' failed", e.VarName, e.Surface)
 }
 
-type ErrRead struct {
-	Pos []byte
-	Err error
+// ErrOutputIsSurface indicates the output variable is a surface value
+type ErrOutputIsSurface struct {
+	VarName string
 }
 
-func (e *ErrRead) Error() string {
-	return fmt.Sprintf("read failed at position '%v': %v", e.Pos, e.Err)
-}
-
-type InputErr struct {
-	Index int64
-	Err   error
-}
-
-func (e *InputErr) Error() string {
-	return fmt.Sprintf("input at index '%d' failed: %v", e.Index, e.Err)
-}
-
-type OutputErr struct {
-	Index int64
-	Data  []byte
-	Err   error
-}
-
-func (e *OutputErr) Error() string {
-	return fmt.Sprintf("output at index '%d' with data '%v' failed: %v", e.Index, e.Data, e.Err)
+func (e *ErrOutputIsSurface) Error() string {
+	return fmt.Sprintf("variable '%s' is a surface value, can not be used as output parameter", e.VarName)
 }
 
 // ============== Function Call (RS) Errors ==============
+
+// ErrCallInt64Assert indicates a variable from call assert int64 failed.
+type ErrCallInt64Assert struct {
+	VarName string
+	Surface interface{}
+}
+
+func (e *ErrCallInt64Assert) Error() string {
+	return fmt.Sprintf("call int64 assert failed: %s", e.VarName)
+}
+
+// ErrCallBytesAssert indicates a variable from call assert bytes failed.
+type ErrCallBytesAssert struct {
+	VarName string
+	Surface interface{}
+}
+
+func (e *ErrCallBytesAssert) Error() string {
+	return fmt.Sprintf("call bytes assert failed: %s", e.VarName)
+}
+
+// ErrFuncNameInvalid indicates the RS function name is invalid.
+type ErrFuncNameInvalid struct{ Name string }
+
+func (e *ErrFuncNameInvalid) Error() string {
+	return fmt.Sprintf("function name '%s' is invalid", e.Name)
+}
 
 // ErrFuncNotFound indicates the RS function was not found in the environment.
 type ErrFuncNotFound struct{ Name string }
@@ -165,46 +187,33 @@ func (e *ErrFuncInputCount) Error() string {
 	return fmt.Sprintf("function '%s' requires %d inputs, but %d given", e.Name, e.Expected, e.Got)
 }
 
-// ErrFuncOutputCount indicates a mismatch in the number of output arguments.
-type ErrFuncOutputCount struct {
-	Name     string
-	Expected int
-	Got      int
+// ErrCallFunctionFailed indicates a function call failed.
+type ErrCallFunctionFailed struct {
+	FunName  string
+	Detailed string
 }
 
-func (e *ErrFuncOutputCount) Error() string {
-	return fmt.Sprintf("function '%s' requires %d outputs, but %d given", e.Name, e.Expected, e.Got)
+func (e ErrCallFunctionFailed) Error() string {
+	return fmt.Sprintf("call function '%s' failed: %s", e.FunName, e.Detailed)
 }
 
-// ErrFuncOutputNotVar indicates an output argument that should be a variable name is a literal.
-type ErrFuncOutputNotVar struct {
-	FuncName    string
-	OutputIndex int
+// ErrReadFileFailed indicates a file read failed.
+type ErrReadFileFailed struct {
+	Path     string
+	Detailed string
 }
 
-func (e *ErrFuncOutputNotVar) Error() string {
-	return fmt.Sprintf("call_rs: output %d for '%s' must be a variable, not a literal", e.OutputIndex, e.FuncName)
+func (e ErrReadFileFailed) Error() string {
+	return fmt.Sprintf("read file '%s' failed: %s", e.Path, e.Detailed)
 }
 
-// ErrUnsupportedInputType indicates an input type that is not supported for RS function.
-type ErrUnsupportedInputType struct {
-	FuncName   string
-	InputIndex int
-	InputType  string
+type ErrParsePvFailed struct {
+	Path     string
+	Detailed string
 }
 
-func (e *ErrUnsupportedInputType) Error() string {
-	return fmt.Sprintf("call_rs: input %d for '%s' unsupported type '%s'", e.InputIndex, e.FuncName, e.InputType)
-}
-
-type ErrUnsupportedOutputType struct {
-	FuncName    string
-	OutputIndex int
-	OutputType  string
-}
-
-func (e *ErrUnsupportedOutputType) Error() string {
-	return fmt.Sprintf("call_rs: output %d for '%s' unsupported type '%s'", e.OutputIndex, e.FuncName, e.OutputType)
+func (e ErrParsePvFailed) Error() string {
+	return fmt.Sprintf("parse pv file '%s' failed: %s", e.Path, e.Detailed)
 }
 
 // ============== Operand & Arithmetic Errors ==============
