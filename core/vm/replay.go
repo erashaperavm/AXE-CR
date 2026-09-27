@@ -14,23 +14,23 @@ func NewReplayVM(
 	privIn PrivateInput,
 	privInExpr []PrivateInputExpr,
 	traces map[int64]TraceStep,
-	isolationMem *IsolationMemory,
+	isolationMem *IsolatedMemory,
 ) *VM {
 	return &VM{
-		Code:         code,
-		OriginPos:    originPos,
-		TraceMode:    true,
-		Env:          env,
-		PubIn:        pubIn,
-		PrivIn:       privIn,
-		PrivInExpr:   privInExpr,
-		PC:           0,
-		Lines:        0,
-		Mem:          NewMemoryObj(),
-		Vars:         make(map[string]Ptr),
-		Blocks:       make(map[int64]Block),
-		IsolationMem: isolationMem,
-		Traces:       traces,
+		Code:        code,
+		OriginPos:   originPos,
+		TraceMode:   true,
+		Env:         env,
+		PubIn:       pubIn,
+		PrivIn:      privIn,
+		PrivInExpr:  privInExpr,
+		PC:          0,
+		Lines:       0,
+		Mem:         NewMemoryObj(),
+		Vars:        make(map[string]Ptr),
+		Blocks:      make(map[int64]Block),
+		IsolatedMem: isolationMem,
+		Traces:      traces,
 	}
 }
 
@@ -86,7 +86,7 @@ func (vm *VM) Replay() (error, []TokenPos) {
 				}
 
 				// 判断是否为 Priv 和 Isolation Memory
-				if vm.Vars[varName].Kind == PrivStack || vm.Vars[varName].Kind == PrivHeap || vm.Vars[varName].Kind == IsolationHeap || vm.Vars[varName].Kind == IsolationStack {
+				if vm.Vars[varName].Kind == PRIV_STACK || vm.Vars[varName].Kind == PRIV_HEAP || vm.Vars[varName].Kind == ISOLATED_STACK || vm.Vars[varName].Kind == ISOLATED_HEAP {
 					sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
 					return &ErrExecShouldFoundItUnmatchMemType{VarName: varName, Got: "Priv or Isolation", Expect: "PubStack or PubHeap (Pub: int64 or bytes)"}, []TokenPos{sourcePos}
 				}
@@ -97,8 +97,8 @@ func (vm *VM) Replay() (error, []TokenPos) {
 
 				// 读取写入的 IsolationMem 对比上一帧内存对应变量 eq
 				switch ptrOfOrig.Kind {
-				case PubStack:
-					contentFromIsolationMem, ok := vm.IsolationMem.readStackOnlyForReplay(vm.Vars[varNameThis])
+				case PUB_STACK:
+					contentFromIsolationMem, ok := vm.IsolatedMem.readStackOnlyForReplay(vm.Vars[varNameThis])
 					if !ok {
 						sourcePos := vm.OriginPos[vm.PC][int64(i+1)]
 						return &ErrIsolationMemInaccessible{VarName: varNameThis}, []TokenPos{sourcePos}

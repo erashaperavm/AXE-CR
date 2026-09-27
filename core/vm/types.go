@@ -1,55 +1,126 @@
 package vm
 
-type Opcode byte
+const INTERNAL_PUB_VAR_IN_SIGN string = "__internal_pub_in_"
+const INTERNAL_PRIV_VAR_IN_SIGN string = "__internal_priv_in_"
+const INTERNAL_EXPR_SIGN string = "__internal_expr_"
+const INTERNAL_PUB_VAR_OUT_SIGN string = "__internal_pub_out_"
+
+type Code struct {
+	OpCode       OpWrap
+	ArgType      []ArgTypeWrap
+	IsArgSurface []IsSurfaceWrap // to assert is surface value
+	ArgContent   []ArgContWrap   // if IsArgSurface is true, it's surface value; else it's var name
+}
+
+type OpWrap struct {
+	Code     Op
+	TokenPos TokPos
+}
+
+type ArgTypeWrap struct {
+	Type     ArgT
+	TokenPos TokPos
+}
+
+type ArgContWrap struct {
+	ArgContent               string
+	ArgContentInt64IfSurface int64
+	TokenPos                 TokPos
+}
+
+type IsSurfaceWrap struct {
+	IsSurface bool
+	TokenPos  TokPos
+}
+
+type ArgT byte
+
+type Op byte
 
 const (
-	// operate chain
-	OP_READ = iota
+	/*
+		Interact with Chain token
+	*/
+	OP_READ Op = iota
 	OP_INPUT
 	OP_WRITE
 	OP_OUTPUT
 
-	// memory manage
+	/*
+		Manage PubMemory Token
+	*/
 	OP_ALLOC
 	OP_UPDATE
 	OP_DROP
 
-	// arithmetic
+	/*
+		Arithmetic Operation Token
+	*/
 	OP_ADD
 	OP_SUB
 	OP_MUL
 	OP_DIV
 
-	// equal
+	/*
+		Equal Operation Token
+	*/
 	OP_EQ_INT
 	OP_EQ_BYTES
 
-	// compare
+	/*
+		Compare Operation Token
+	*/
 	OP_LARGE_INT
 
-	// jump
+	/*
+		Jump and Judge Token
+	*/
 	OP_JMP
 	OP_IF
 
-	// block token
+	/*
+		Block Token
+	*/
 	OP_BEGIN
 	OP_END
 
-	// call function
+	/*
+		Call function Token
+	*/
 	OP_CALL_RS
 	OP_CALL_C
 	OP_CALL_CPP
 )
 
+const (
+	/*
+		Public Type
+	*/
+	PUB_I64 ArgT = iota
+	PUB_BYTES
+
+	/*
+		Private Type
+	*/
+	PRIV_I64
+	PRIV_BYTES
+
+	/*
+		Isolation Type
+	*/
+	ISO_I64
+	ISO_BYTES
+)
+
 type PtrKind byte
 
 const (
-	PubStack PtrKind = iota
-	PubHeap
-	PrivStack // 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
-	PrivHeap  // 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
-	IsolationHeap
-	IsolationStack // 隔离内存，用于存储程序不可访问内容，如 report 等
+	PUB_STACK PtrKind = iota
+	PUB_HEAP
+	PRIV_STACK // 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
+	PRIV_HEAP  // 隐私内存由调用者提供，不支持 VM 层更新，支持在外部函数中获取副本可变性
+	ISOLATED_STACK
+	ISOLATED_HEAP // 隔离内存，用于存储程序不可访问内容，如 report 等
 )
 
 type Ptr struct {
@@ -57,21 +128,14 @@ type Ptr struct {
 	Pointer int64
 }
 
-type Instruction struct {
-	Op            Opcode
-	ArgType       []string
-	ArgIdentifier []string
-}
-
 type PublicInput struct {
 	Int64 []int64
 	Bytes [][]byte
 }
 
-type PrivateInput struct {
-	Int64 []int64
-	Bytes [][]byte
-}
+// PrivateInput is the same as the PublicInput,
+// the only difference is PrivateInput only exists in executors
+type PrivateInput = PublicInput
 
 type PrivateInputExpr struct {
 	Kind    PtrKind
@@ -132,7 +196,7 @@ type BlocksDiff struct {
 	Now   Block
 }
 
-type TokenPos struct {
+type TokPos struct {
 	Line int64
 	Col  int64
 }

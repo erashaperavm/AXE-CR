@@ -32,7 +32,7 @@ func (e *ErrTypeMismatch) Error() string {
 // ============== Memory Errors ==============
 
 // ErrUnsupportedMemType indicates an unsupported memory type.
-type ErrUnsupportedMemType struct{ MemType interface{} }
+type ErrUnsupportedMemType struct{ MemType PtrKind }
 
 func (e *ErrUnsupportedMemType) Error() string {
 	return fmt.Sprintf("unsupported mem type: %v", e.MemType)
@@ -87,14 +87,24 @@ func (e *ErrBlockLabelInvalid) Error() string {
 
 // ============== Instruction Errors ==============
 
-// ErrTypeArgNumMismatch indicates a mismatch in the number of type and arguments.
-type ErrTypeArgNumMismatch struct {
-	GetType int
-	GetArg  int
+// ErrTypeContentLenMismatch indicates that len(ins.ArgType) != len(ins.ArgCont)
+type ErrTypeContentLenMismatch struct {
+	ArgTypeHave int
+	ArgContHave int
 }
 
-func (e *ErrTypeArgNumMismatch) Error() string {
-	return fmt.Sprintf("type arg num mismatch: expected %d, got %d", e.GetType, e.GetArg)
+func (e *ErrTypeContentLenMismatch) Error() string {
+	return fmt.Sprintf("length of ArgType %d and length of ArgCont %d do not equals: %s", e.ArgTypeHave, e.ArgContHave)
+}
+
+// ErrTypeIsSurfaceLenMismatch indicates that len(ins.ArgType) != len(ins.ArgCont)
+type ErrTypeIsSurfaceLenMismatch struct {
+	ArgTypeHave      int
+	ArgIsSurfaceHave int
+}
+
+func (e *ErrTypeIsSurfaceLenMismatch) Error() string {
+	return fmt.Sprintf("length of ArgType %d and length of IsArgSurface %d do not equals: %s", e.ArgTypeHave, e.ArgIsSurfaceHave)
 }
 
 // ErrUnknownOpcode indicates an unknown opcode.
@@ -131,13 +141,24 @@ func (e *ErrUpdateVarBySurfaceBytes) Error() string {
 	return fmt.Sprintf("update var '%s' by surface bytes '%v' failed", e.VarName, e.Surface)
 }
 
-// ErrOutputIsSurface indicates the output variable is a surface value
-type ErrOutputIsSurface struct {
-	VarName string
+// ErrOutputIsPrivMem indicates that program tries to return a privacy type which located in privacy mem
+type ErrOutputIsPrivMem struct {
+	VarName   string
+	ReturnIdx int
 }
 
-func (e *ErrOutputIsSurface) Error() string {
-	return fmt.Sprintf("variable '%s' is a surface value, can not be used as output parameter", e.VarName)
+func (e *ErrOutputIsPrivMem) Error() string {
+	return fmt.Sprintf("output cannot be priv type (which is in priv mem): output idx: %d, output var name: %v", e.ReturnIdx, e.VarName)
+}
+
+// ErrOutputIsIsoMem indicates that program tries to return a privacy type which located in privacy mem
+type ErrOutputIsIsoMem struct {
+	VarName   string
+	ReturnIdx int
+}
+
+func (e *ErrOutputIsIsoMem) Error() string {
+	return fmt.Sprintf("output cannot be isolated type (which is in isolated mem): output idx: %d, output var name: %v", e.ReturnIdx, e.VarName)
 }
 
 // ============== Function Call (RS) Errors ==============

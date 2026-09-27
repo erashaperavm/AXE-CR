@@ -5,10 +5,14 @@ import (
 )
 
 // 地址分配器，初始地址从 0 开始
-var nextStackAddr int64 = 0
-var nextHeapAddr int64 = 0
+var nextPubStackAddr int64 = 0
+var nextPubHeapAddr int64 = 0
+var nextPrivStackAddr int64 = 0
+var nextPrivHeapAddr int64 = 0
+var nextIsoStackAddr int64 = 0
+var nextIsoHeapAddr int64 = 0
 
-type Memory struct {
+type PubMemory struct {
 	Stack map[int64]int64
 	Heap  map[int64][]byte
 }
@@ -25,7 +29,7 @@ type PrivacyMemory struct {
 	}
 }
 
-type IsolationMemory struct {
+type IsolatedMemory struct {
 	Stack map[int64]struct {
 		Detail  int64
 		Counter int8
@@ -36,8 +40,8 @@ type IsolationMemory struct {
 	}
 }
 
-func NewMemoryObj() *Memory {
-	return &Memory{
+func NewMemoryObj() *PubMemory {
+	return &PubMemory{
 		Stack: make(map[int64]int64),
 		Heap:  make(map[int64][]byte),
 	}
@@ -56,8 +60,8 @@ func NewPrivacyMemoryObj() *PrivacyMemory {
 	}
 }
 
-func NewIsolationMemoryObj() *IsolationMemory {
-	return &IsolationMemory{
+func NewIsolationMemoryObj() *IsolatedMemory {
+	return &IsolatedMemory{
 		Heap: make(map[int64]struct {
 			Detail  []byte
 			Counter int8
@@ -65,22 +69,22 @@ func NewIsolationMemoryObj() *IsolationMemory {
 	}
 }
 
-func (m *Memory) allocStack() Ptr {
-	addr := nextStackAddr
-	nextStackAddr++
+func (m *PubMemory) allocStack() Ptr {
+	addr := nextPubStackAddr
+	nextPubStackAddr++
 	m.Stack[addr] = 0
-	return Ptr{Kind: PubStack, Pointer: addr}
+	return Ptr{Kind: PUB_STACK, Pointer: addr}
 }
 
-func (m *Memory) allocHeap(size int64) Ptr {
-	addr := nextHeapAddr
-	nextHeapAddr += size
+func (m *PubMemory) allocHeap(size int64) Ptr {
+	addr := nextPubHeapAddr
+	nextPubHeapAddr++
 	m.Heap[addr] = make([]byte, size)
-	return Ptr{Kind: PubHeap, Pointer: addr}
+	return Ptr{Kind: PUB_HEAP, Pointer: addr}
 }
 
-func (m *Memory) readStack(ptr Ptr) (int64, bool) {
-	if ptr.Kind != PubStack && ptr.Kind != PrivStack {
+func (m *PubMemory) readStack(ptr Ptr) (int64, bool) {
+	if ptr.Kind != PUB_STACK && ptr.Kind != PRIV_STACK {
 		return 0, false
 	}
 	i, ok := m.Stack[ptr.Pointer]
@@ -91,8 +95,8 @@ func (m *Memory) readStack(ptr Ptr) (int64, bool) {
 	return i, true
 }
 
-func (m *Memory) writeStack(data int64, ptr Ptr) bool {
-	if ptr.Kind != PubStack {
+func (m *PubMemory) writeStack(data int64, ptr Ptr) bool {
+	if ptr.Kind != PUB_STACK {
 		return false
 	}
 	_, ok := m.Stack[ptr.Pointer]
@@ -104,8 +108,8 @@ func (m *Memory) writeStack(data int64, ptr Ptr) bool {
 	return true
 }
 
-func (m *Memory) readHeap(ptr Ptr) ([]byte, bool) {
-	if ptr.Kind != PubHeap && ptr.Kind != PrivHeap {
+func (m *PubMemory) readHeap(ptr Ptr) ([]byte, bool) {
+	if ptr.Kind != PUB_HEAP && ptr.Kind != PRIV_HEAP {
 		return nil, false
 	}
 	b, ok := m.Heap[ptr.Pointer]
@@ -116,8 +120,8 @@ func (m *Memory) readHeap(ptr Ptr) ([]byte, bool) {
 	return b, true
 }
 
-func (m *Memory) writeHeap(data []byte, ptr Ptr) bool {
-	if ptr.Kind != PubHeap {
+func (m *PubMemory) writeHeap(data []byte, ptr Ptr) bool {
+	if ptr.Kind != PUB_HEAP {
 		return false
 	}
 	_, ok := m.Heap[ptr.Pointer]
@@ -128,23 +132,23 @@ func (m *Memory) writeHeap(data []byte, ptr Ptr) bool {
 	return true
 }
 
-func (m *Memory) free(p Ptr) {
+func (m *PubMemory) free(p Ptr) {
 	switch p.Kind {
-	case PubStack:
+	case PUB_STACK:
 		delete(m.Stack, p.Pointer)
-	case PubHeap:
+	case PUB_HEAP:
 		delete(m.Heap, p.Pointer)
-	case PrivStack:
+	case PRIV_STACK:
 		panic("PrivStack is not supported")
-	case PrivHeap:
+	case PRIV_HEAP:
 		panic("PrivHeap is not supported")
 	default:
 		panic("unimplemented ptr kind")
 	}
 }
 
-func (m *Memory) copy() *Memory {
-	var newMem *Memory
+func (m *PubMemory) copy() *PubMemory {
+	var newMem *PubMemory
 
 	for addr, val := range m.Stack {
 		newMem.Stack[addr] = val
@@ -155,7 +159,7 @@ func (m *Memory) copy() *Memory {
 	return newMem
 }
 
-func (m *Memory) getDiff(oldMem *Memory) TraceStep {
+func (m *PubMemory) getDiff(oldMem *PubMemory) TraceStep {
 	var stackChanges []StackDiff
 	var heapChanges []HeapDiff
 	for addr, pre := range oldMem.Stack {
@@ -191,7 +195,7 @@ func (m *Memory) getDiff(oldMem *Memory) TraceStep {
 	}
 }
 
-func (m *Memory) applyDiff(diff TraceStep) {
+func (m *PubMemory) applyDiff(diff TraceStep) {
 	for _, stackDiff := range diff.StackChanges {
 		if stackDiff.Now != stackDiff.Pre {
 			m.Stack[stackDiff.Addr] = stackDiff.Now
@@ -206,27 +210,27 @@ func (m *Memory) applyDiff(diff TraceStep) {
 }
 
 func (m *PrivacyMemory) allocStack() Ptr {
-	addr := nextStackAddr
-	nextStackAddr++
+	addr := nextPrivStackAddr
+	nextPrivStackAddr++
 	m.Stack[addr] = struct {
 		Detail  int64
 		Counter int8
 	}{Detail: 0, Counter: 0}
-	return Ptr{Kind: PrivStack, Pointer: addr}
+	return Ptr{Kind: PRIV_STACK, Pointer: addr}
 }
 
 func (m *PrivacyMemory) allocHeap(size int64) Ptr {
-	addr := nextHeapAddr
-	nextHeapAddr += size
+	addr := nextPubHeapAddr
+	nextPrivHeapAddr++
 	m.Heap[addr] = struct {
 		Detail  []byte
 		Counter int8
 	}{Detail: make([]byte, size), Counter: 0}
-	return Ptr{Kind: PrivHeap, Pointer: addr}
+	return Ptr{Kind: PRIV_HEAP, Pointer: addr}
 }
 
 func (m *PrivacyMemory) readStack(ptr Ptr) (int64, bool) {
-	if ptr.Kind != PrivStack {
+	if ptr.Kind != PRIV_STACK {
 		return 0, false
 	}
 	i, ok := m.Stack[ptr.Pointer]
@@ -238,7 +242,7 @@ func (m *PrivacyMemory) readStack(ptr Ptr) (int64, bool) {
 }
 
 func (m *PrivacyMemory) writeStack(data int64, ptr Ptr) bool {
-	if ptr.Kind != PrivStack {
+	if ptr.Kind != PRIV_STACK {
 		return false
 	}
 	_, ok := m.Stack[ptr.Pointer]
@@ -257,7 +261,7 @@ func (m *PrivacyMemory) writeStack(data int64, ptr Ptr) bool {
 }
 
 func (m *PrivacyMemory) readHeap(ptr Ptr) ([]byte, bool) {
-	if ptr.Kind != PrivHeap {
+	if ptr.Kind != PRIV_HEAP {
 		return nil, false
 	}
 	b, ok := m.Heap[ptr.Pointer]
@@ -269,7 +273,7 @@ func (m *PrivacyMemory) readHeap(ptr Ptr) ([]byte, bool) {
 }
 
 func (m *PrivacyMemory) writeHeap(data []byte, ptr Ptr) bool {
-	if ptr.Kind != PrivHeap {
+	if ptr.Kind != PRIV_HEAP {
 		return false
 	}
 	_, ok := m.Heap[ptr.Pointer]
@@ -288,28 +292,41 @@ func (m *PrivacyMemory) writeHeap(data []byte, ptr Ptr) bool {
 
 func (m *PrivacyMemory) free(p Ptr) {
 	switch p.Kind {
-	case PrivStack:
+	case PRIV_STACK:
 		// 隐私栈不支持 VM 层级释放
-	case PrivHeap:
+	case PRIV_HEAP:
 		// 隐私堆不支持 VM 层级释放
 	default:
 		panic("unimplemented ptr kind")
 	}
 }
 
-func (m *IsolationMemory) allocHeap(size int64) Ptr {
-	addr := nextHeapAddr
-	nextHeapAddr += size
+func (m *IsolatedMemory) allocStack() Ptr {
+	addr := nextIsoStackAddr
+	nextIsoStackAddr++
+	m.Stack[addr] = struct {
+		Detail  int64
+		Counter int8
+	}{Detail: 0, Counter: 0}
+	return Ptr{
+		Kind:    ISOLATED_STACK,
+		Pointer: addr,
+	}
+}
+
+func (m *IsolatedMemory) allocHeap(size int64) Ptr {
+	addr := nextIsoHeapAddr
+	nextIsoHeapAddr++
 	m.Heap[addr] = struct {
 		Detail  []byte
 		Counter int8
 	}{Detail: make([]byte, size), Counter: 0}
-	return Ptr{Kind: IsolationHeap, Pointer: addr}
+	return Ptr{Kind: ISOLATED_STACK, Pointer: addr}
 }
 
 // readHeapOnlyForReplay func OnlyForReplay !!!
-func (m *IsolationMemory) readHeapOnlyForReplay(ptr Ptr) ([]byte, bool) {
-	if ptr.Kind != IsolationHeap {
+func (m *IsolatedMemory) readHeapOnlyForReplay(ptr Ptr) ([]byte, bool) {
+	if ptr.Kind != ISOLATED_STACK {
 		return nil, false
 	}
 
@@ -325,8 +342,8 @@ func (m *IsolationMemory) readHeapOnlyForReplay(ptr Ptr) ([]byte, bool) {
 	return b.Detail, true
 }
 
-func (m *IsolationMemory) writeHeap(data []byte, ptr Ptr) bool {
-	if ptr.Kind != IsolationHeap {
+func (m *IsolatedMemory) writeHeap(data []byte, ptr Ptr) bool {
+	if ptr.Kind != ISOLATED_STACK {
 		return false
 	}
 	_, ok := m.Heap[ptr.Pointer]
@@ -344,8 +361,8 @@ func (m *IsolationMemory) writeHeap(data []byte, ptr Ptr) bool {
 }
 
 // readStackOnlyForReplay func OnlyForReplay !!!
-func (m *IsolationMemory) readStackOnlyForReplay(ptr Ptr) (int64, bool) {
-	if ptr.Kind != IsolationStack {
+func (m *IsolatedMemory) readStackOnlyForReplay(ptr Ptr) (int64, bool) {
+	if ptr.Kind != ISOLATED_HEAP {
 		return 0, false
 	}
 
@@ -361,8 +378,8 @@ func (m *IsolationMemory) readStackOnlyForReplay(ptr Ptr) (int64, bool) {
 	return n.Detail, true
 }
 
-func (m *IsolationMemory) writeStack(data int64, ptr Ptr) bool {
-	if ptr.Kind != IsolationStack {
+func (m *IsolatedMemory) writeStack(data int64, ptr Ptr) bool {
+	if ptr.Kind != ISOLATED_HEAP {
 		return false
 	}
 	_, ok := m.Stack[ptr.Pointer]
