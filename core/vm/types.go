@@ -25,6 +25,7 @@ type ArgTypeWrap struct {
 type ArgContWrap struct {
 	ArgContent               string
 	ArgContentInt64IfSurface int64
+	ArgContentBytesIfSurface []byte
 	TokenPos                 TokPos
 }
 

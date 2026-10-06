@@ -373,7 +373,7 @@ func (vm *VM) Run() (error, []TokPos) {
 					}
 					ptr := vm.allocVar(nicknameVar, ISOLATED_HEAP, int64(len(cont)))
 					// 写入
-					ok = vm.IsolatedMem.writeHeap([]byte(cont), ptr)
+					ok = vm.IsolatedMem.writeHeap(cont, ptr)
 					if !ok {
 						return &ErrIsolationMemInaccessible{nicknameVar}, []TokPos{contVar.TokenPos}
 					}
@@ -444,124 +444,173 @@ func (vm *VM) Run() (error, []TokPos) {
 
 		case OP_UPDATE:
 			/*
-				OP_UPDATE
-
-				var_name
-				NativeType / varname -> 字面值（非变量，int64 数字或 []byte '' 数据）
-
-				varname -> 变量名称
-				surface / varname -> 字面值
+				Code{
+					OpCode:       OpWrap{OP_UPDATE,TokPos{..}},
+					ArgType:      []ArgTypeWrap{..}, // 这里两个类型应该相等
+					IsArgSurface: []IsSurfaceWrap{..}, // 第一个应该是变量名，第二个可以是表面值
+					ArgContent:   []ArgContWrap{..},
+				}
 			*/
 
-			const (
-				surfaceBytes = iota
-				surfaceInt64
-				identifier
-			)
+			varName := ins.ArgContent[0].ArgContent
+			varType := ins.ArgType[0].Type
+			switch ins.IsArgSurface[1].IsSurface {
+			case true:
+				// targetVal is surface val
+				switch varType {
+				case PUB_I64:
+					targetVal := ins.ArgContent[1].ArgContentInt64IfSurface
+					ok := vm.updateVarBySurfaceInt64Pub(varName, targetVal)
+					if !ok {
+						return &ErrUpdateVarBySurfaceInt64{
+							VarName: varName,
+							Surface: targetVal,
+						}, []TokPos{ins.ArgContent[0].TokenPos}
+					}
+				case PUB_BYTES:
+					targetVal := ins.ArgContent[1].ArgContentBytesIfSurface
+					ok := vm.updateVarBySurfaceBytesPub(varName, targetVal)
+					if !ok {
+						return &ErrUpdateVarBySurfaceBytes{
+							VarName: varName,
+							Surface: targetVal,
+						}, []TokPos{ins.ArgContent[0].TokenPos}
+					}
+				case PRIV_I64:
+					// priv mem only write at the program started to load to priv input
+					// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+					return &ErrUpdatePrivVarBySurface{
+						VarName: varName,
+					}, []TokPos{ins.ArgContent[0].TokenPos}
+				case PRIV_BYTES:
+					// priv mem only write at the program started to load to priv input
+					// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+					return &ErrUpdatePrivVarBySurface{
+						VarName: varName,
+					}, []TokPos{ins.ArgContent[0].TokenPos}
+				case ISO_I64:
+					// iso mem only write at rust / c / cpp function call with zkvm to storage vm runtime data
+					// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+					return &ErrIsolationMemInaccessible{VarName: varName}, []TokPos{ins.ArgContent[0].TokenPos}
+				case ISO_BYTES:
+					// iso mem only write at rust / c / cpp function call with zkvm to storage vm runtime data
+					// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+					return &ErrIsolationMemInaccessible{VarName: varName}, []TokPos{ins.ArgContent[0].TokenPos}
+				default:
+					return &ErrUnsupportedMemType{MemType: PtrKind(varType)}, []TokPos{ins.ArgContent[0].TokenPos}
+				}
+			case false:
+				// targetVal is not surface val, but a var
+				targetVarName := ins.ArgContent[1].ArgContent
+				targetVarType := ins.ArgType[1].Type
+				switch varType {
+				case PUB_I64:
+					switch targetVarType {
+					case PUB_I64:
+						targetVal, ok := vm.getInt64VarPub(targetVarName)
+						if !ok {
+							return &ErrVarNotFound{Name: targetVarName}, []TokPos{ins.ArgContent[0].TokenPos}
+						}
+						ok = vm.updateVarBySurfaceInt64Pub(varName, targetVal)
+						if !ok {
+							return &ErrUpdateVarBySurfaceInt64{
+								VarName: varName,
+								Surface: targetVal,
+							}, []TokPos{ins.ArgContent[0].TokenPos}
+						}
+					case PUB_BYTES:
+						return &ErrTypeMismatch{
+							Expected: "PUB_I64",
+							Got:      "PUB_BYTES",
+						}, []TokPos{ins.ArgContent[1].TokenPos}
+					case PRIV_I64:
+						return &ErrTypeMismatch{
+							Expected: "PUB_I64",
+							Got:      "PRIV_I64",
+						}, []TokPos{ins.ArgContent[1].TokenPos}
+					case PRIV_BYTES:
+						return &ErrTypeMismatch{
+							Expected: "PUB_I64",
+							Got:      "PRIV_BYTES",
+						}, []TokPos{ins.ArgContent[1].TokenPos}
+					case ISO_I64:
+						return &ErrTypeMismatch{
+							Expected: "PUB_I64",
+							Got:      "ISO_I64",
+						}, []TokPos{ins.ArgContent[1].TokenPos}
+					case ISO_BYTES:
+						return &ErrTypeMismatch{
+							Expected: "PUB_I64",
+							Got:      "ISO_BYTES",
+						}, []TokPos{ins.ArgContent[1].TokenPos}
+					default:
+						return &ErrUnsupportedMemType{MemType: PtrKind(targetVarType)}, []TokPos{ins.ArgContent[1].TokenPos}
+					}
 
-			var kind byte
-			var num int64
-			var byt []byte
+				case PUB_BYTES:
+					switch ins.ArgType[1].Type {
+					case PUB_I64:
+						return &ErrTypeMismatch{
+							Expected: "PUB_BYTES",
+							Got:      "PUB_I64",
+						}, []TokPos{ins.ArgContent[1].TokenPos}
+					case PUB_BYTES:
+						targetVal, ok := vm.getBytesVarPub(targetVarName)
+						if !ok {
+							return &ErrVarNotFound{Name: targetVarName}, []TokPos{ins.ArgContent[1].TokenPos}
+						}
+						ok = vm.updateVarBySurfaceBytesPub(varName, targetVal)
+						if !ok {
+							return &ErrUpdateVarBySurfaceBytes{
+								VarName: varName,
+								Surface: targetVal,
+							}, []TokPos{ins.ArgContent[1].TokenPos}
+						}
+					case PRIV_I64:
+						return &ErrTypeMismatch{
+							Expected: "PUB_BYTES",
+							Got:      "PRIV_I64",
+						}, []TokPos{ins.ArgContent[1].TokenPos}
+					case PRIV_BYTES:
+						return &ErrTypeMismatch{
+							Expected: "PUB_BYTES",
+							Got:      "PRIV_BYTES",
+						}, []TokPos{ins.ArgContent[1].TokenPos}
+					case ISO_I64:
+						return &ErrTypeMismatch{
+							Expected: "PUB_BYTES",
+							Got:      "ISO_I64",
+						}, []TokPos{ins.ArgContent[1].TokenPos}
+					case ISO_BYTES:
+						return &ErrTypeMismatch{
+							Expected: "PUB_BYTES",
+							Got:      "ISO_BYTES",
+						}, []TokPos{ins.ArgContent[1].TokenPos}
+					}
 
-			if ins.ArgIdentifier[1][0] == '\'' || ins.ArgIdentifier[1][len(ins.ArgIdentifier[1])] == '\'' {
-				// 是 []byte
-				kind = surfaceBytes
-				byt = []byte(ins.ArgIdentifier[1])
-			} else {
-				num_, err := strconv.ParseInt(ins.ArgIdentifier[1], 10, 64)
-				if err != nil {
-					// 不是 int64
-					kind = identifier
+				case PRIV_I64:
+					// priv mem only write at the program started to load to priv input
+					// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+					return &ErrUpdatePrivVarBySurface{
+						VarName: varName,
+					}, []TokPos{ins.ArgContent[0].TokenPos}
+				case PRIV_BYTES:
+					// priv mem only write at the program started to load to priv input
+					// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+					return &ErrUpdatePrivVarBySurface{
+						VarName: varName,
+					}, []TokPos{ins.ArgContent[0].TokenPos}
+				case ISO_I64:
+					// iso mem only write at rust / c / cpp function call with zkvm to storage vm runtime data
+					// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+					return &ErrIsolationMemInaccessible{VarName: varName}, []TokPos{ins.ArgContent[0].TokenPos}
+				case ISO_BYTES:
+					// iso mem only write at rust / c / cpp function call with zkvm to storage vm runtime data
+					// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+					return &ErrIsolationMemInaccessible{VarName: varName}, []TokPos{ins.ArgContent[0].TokenPos}
+				default:
+					return &ErrUnsupportedMemType{MemType: PtrKind(varType)}, []TokPos{ins.ArgContent[0].TokenPos}
 				}
-				// 是 int64
-				kind = surfaceInt64
-				num = num_
-			}
-
-			switch kind {
-			case surfaceInt64:
-				switch vm.Vars[ins.ArgIdentifier[0]].Kind {
-				case PUB_STACK:
-					ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[0], num)
-					if !ok {
-						sourcePos := vm.OriginPos[vm.PC][3]
-						return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
-					}
-				case PRIV_STACK:
-					// Priv 数据修改只允许在 Call 分支中处理
-					sourcePos := vm.OriginPos[vm.PC][3]
-					return &ErrPrivacyMemUpdateInNoCallIns{ThisIns: "update"}, []TokenPos{sourcePos}
-				case PUB_HEAP:
-					// PubHeap 数据修改只允许用 Heap 类型数据替代
-					sourcePos := vm.OriginPos[vm.PC][3]
-					return &ErrTypeMismatch{
-						Expected: "PubStack",
-						Got:      "PubHeap",
-					}, []TokenPos{sourcePos}
-				case PRIV_HEAP:
-					// Priv 数据修改只允许在 Call 分支中处理
-					sourcePos := vm.OriginPos[vm.PC][3]
-					return &ErrPrivacyMemUpdateInNoCallIns{ThisIns: "update"}, []TokenPos{sourcePos}
-				case ISOLATED_STACK:
-					// IsolationHeap 数据修改只允许用 Heap 类型数据替代
-					sourcePos := vm.OriginPos[vm.PC][3]
-					return &ErrTypeMismatch{
-						Expected: "IsolationHeap",
-						Got:      "PubHeap",
-					}, []TokenPos{sourcePos}
-				case ISOLATED_HEAP:
-					ok := vm.IsolatedMem.writeStack(num, vm.Vars[ins.ArgIdentifier[0]])
-					if !ok {
-						sourcePos := vm.OriginPos[vm.PC][3]
-						return &ErrUpdateVarBySurfaceInt64{VarName: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
-					}
-				}
-			case surfaceBytes:
-				switch vm.Vars[ins.ArgIdentifier[0]].Kind {
-				case PUB_STACK:
-					// PubStack 数据修改只允许用 Stack 类型数据替代
-					sourcePos := vm.OriginPos[vm.PC][3]
-					return &ErrTypeMismatch{
-						Expected: "PubHeap",
-						Got:      "PubStack",
-					}, []TokenPos{sourcePos}
-				case PRIV_STACK:
-					// Priv 数据修改只允许在 Call 分支中处理
-					sourcePos := vm.OriginPos[vm.PC][3]
-					return &ErrPrivacyMemUpdateInNoCallIns{ThisIns: "update"}, []TokenPos{sourcePos}
-				case PUB_HEAP:
-					ok := vm.updateVarBySurfaceBytesPub(ins.ArgIdentifier[0], byt)
-					if !ok {
-						sourcePos := vm.OriginPos[vm.PC][3]
-						return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
-					}
-				case PRIV_HEAP:
-					// Priv 数据修改只允许在 Call 分支中处理
-					sourcePos := vm.OriginPos[vm.PC][3]
-					return &ErrPrivacyMemUpdateInNoCallIns{ThisIns: "update"}, []TokenPos{sourcePos}
-				case ISOLATED_STACK:
-					// IsolationHeap 数据修改只允许用 Heap 类型数据替代
-					sourcePos := vm.OriginPos[vm.PC][3]
-					return &ErrTypeMismatch{
-						Expected: "IsolationHeap",
-						Got:      "PubHeap",
-					}, []TokenPos{sourcePos}
-				case ISOLATED_HEAP:
-					ok := vm.IsolatedMem.writeHeap(byt, vm.Vars[ins.ArgIdentifier[0]])
-					if !ok {
-						sourcePos := vm.OriginPos[vm.PC][3]
-						return &ErrUpdateVarBySurfaceBytes{VarName: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
-					}
-				}
-			case identifier:
-				ok := vm.updateVarByIdentifier(ins.ArgIdentifier[0], ins.ArgIdentifier[1])
-				if !ok {
-					sourcePos := vm.OriginPos[vm.PC][3]
-					return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
-				}
-			default:
-				sourcePos := vm.OriginPos[vm.PC][3]
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
 			}
 
 			vm.PC++
@@ -569,17 +618,19 @@ func (vm *VM) Run() (error, []TokPos) {
 
 		case OP_DROP:
 			/*
-				OP_DROP
-
-				var_name
-
-				varname
+				Code{
+					OpCode:       OpWrap{OP_UPDATE,TokPos{..}},
+					ArgType:      []ArgTypeWrap{..}, // 这里类型任意
+					IsArgSurface: []IsSurfaceWrap{..}, // 不应该是字面值，由编译期保证
+					ArgContent:   []ArgContWrap{..}, // 任意存在变量
+				}
 			*/
 
-			err := vm.dropVar(ins.ArgIdentifier[0])
+			varName := ins.ArgContent[0].ArgContent
+
+			err := vm.dropVar(varName)
 			if err != nil {
-				sourcePos := vm.OriginPos[vm.PC][2]
-				return &ErrVarDrop{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePos}
+				return &ErrVarDrop{Name: varName}, []TokPos{ins.ArgContent[0].TokenPos}
 			}
 
 			vm.PC++
@@ -589,29 +640,42 @@ func (vm *VM) Run() (error, []TokPos) {
 			/*
 				OP_ADD
 
-				int64
-				int64
-				var_name
+				ArgType:
+					PUB_I64
+					PUB_I64
 
-				num1
-				num2
-				sum
+				Code{
+					OpCode:       OpWrap{OP_ADD,TokPos{..}},
+					ArgType:      []ArgTypeWrap{..}, // 类型都为 PUB_I64
+					IsArgSurface: []IsSurfaceWrap{..}, // 第三个一定为非字面值，编译期保证
+					ArgContent:   []ArgContWrap{..}, // 第三个一定为变量
+				}
 			*/
 
-			aNum, bNum, err := vm.arithmeticPrepare(ins, "add")
-			if err != nil {
-				sourcePosA := vm.OriginPos[vm.PC][4]
-				sourcePosB := vm.OriginPos[vm.PC][5]
-				return &ErrArithmetic{
-					Operation: "add",
-					Err:       err,
-				}, []TokenPos{sourcePosA, sourcePosB}
+			var aNum, bNum, res int64
+			var err error
+			var errPos []TokPos
+			var ok bool
+
+			// 先提取 a
+			aNum, err, errPos, ok = vm.extractArithmeticToken(ins, 0)
+			if !ok {
+				return err, errPos
 			}
 
-			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], aNum+bNum)
+			// 再提取 b
+			bNum, err, errPos, ok = vm.extractArithmeticToken(ins, 1)
 			if !ok {
-				sourcePosSum := vm.OriginPos[vm.PC][6]
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSum}
+				return err, errPos
+			}
+
+			res = aNum + bNum
+
+			resVarName := ins.ArgContent[2].ArgContent
+
+			ok = vm.updateVarBySurfaceInt64Pub(resVarName, res)
+			if !ok {
+				return &ErrVarNotFound{Name: resVarName}, []TokPos{ins.ArgContent[2].TokenPos}
 			}
 
 			vm.PC++
@@ -621,29 +685,42 @@ func (vm *VM) Run() (error, []TokPos) {
 			/*
 				OP_SUB
 
-				int64
-				int64
-				var_name
+				ArgType:
+					PUB_I64
+					PUB_I64
 
-				num1
-				num2
-				sum
+				Code{
+					OpCode:       OpWrap{OP_SUB,TokPos{..}},
+					ArgType:      []ArgTypeWrap{..}, // 类型都为 PUB_I64
+					IsArgSurface: []IsSurfaceWrap{..}, // 第三个一定为非字面值，编译期保证
+					ArgContent:   []ArgContWrap{..}, // 第三个一定为变量
+				}
 			*/
 
-			aNum, bNum, err := vm.arithmeticPrepare(ins, "sub")
-			if err != nil {
-				sourcePosA := vm.OriginPos[vm.PC][4]
-				sourcePosB := vm.OriginPos[vm.PC][5]
-				return &ErrArithmetic{
-					Operation: "sub",
-					Err:       err,
-				}, []TokenPos{sourcePosA, sourcePosB}
+			var aNum, bNum, res int64
+			var err error
+			var errPos []TokPos
+			var ok bool
+
+			// 先提取 a
+			aNum, err, errPos, ok = vm.extractArithmeticToken(ins, 0)
+			if !ok {
+				return err, errPos
 			}
 
-			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], aNum-bNum)
+			// 再提取 b
+			bNum, err, errPos, ok = vm.extractArithmeticToken(ins, 1)
 			if !ok {
-				sourcePosSub := vm.OriginPos[vm.PC][6]
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSub}
+				return err, errPos
+			}
+
+			res = aNum - bNum
+
+			resVarName := ins.ArgContent[2].ArgContent
+
+			ok = vm.updateVarBySurfaceInt64Pub(resVarName, res)
+			if !ok {
+				return &ErrVarNotFound{Name: resVarName}, []TokPos{ins.ArgContent[2].TokenPos}
 			}
 
 			vm.PC++
@@ -653,29 +730,42 @@ func (vm *VM) Run() (error, []TokPos) {
 			/*
 				OP_MUL
 
-				int64
-				int64
-				var_name
+				ArgType:
+					PUB_I64
+					PUB_I64
 
-				num1
-				num2
-				sum
+				Code{
+					OpCode:       OpWrap{OP_MUL,TokPos{..}},
+					ArgType:      []ArgTypeWrap{..}, // 类型都为 PUB_I64
+					IsArgSurface: []IsSurfaceWrap{..}, // 第三个一定为非字面值，编译期保证
+					ArgContent:   []ArgContWrap{..}, // 第三个一定为变量
+				}
 			*/
 
-			aNum, bNum, err := vm.arithmeticPrepare(ins, "mul")
-			if err != nil {
-				sourcePosA := vm.OriginPos[vm.PC][4]
-				sourcePosB := vm.OriginPos[vm.PC][5]
-				return &ErrArithmetic{
-					Operation: "mul",
-					Err:       err,
-				}, []TokenPos{sourcePosA, sourcePosB}
+			var aNum, bNum, res int64
+			var err error
+			var errPos []TokPos
+			var ok bool
+
+			// 先提取 a
+			aNum, err, errPos, ok = vm.extractArithmeticToken(ins, 0)
+			if !ok {
+				return err, errPos
 			}
 
-			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], aNum*bNum)
+			// 再提取 b
+			bNum, err, errPos, ok = vm.extractArithmeticToken(ins, 1)
 			if !ok {
-				sourcePosProduct := vm.OriginPos[vm.PC][6]
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosProduct}
+				return err, errPos
+			}
+
+			res = aNum * bNum
+
+			resVarName := ins.ArgContent[2].ArgContent
+
+			ok = vm.updateVarBySurfaceInt64Pub(resVarName, res)
+			if !ok {
+				return &ErrVarNotFound{Name: resVarName}, []TokPos{ins.ArgContent[2].TokenPos}
 			}
 
 			vm.PC++
@@ -685,29 +775,42 @@ func (vm *VM) Run() (error, []TokPos) {
 			/*
 				OP_DIV
 
-				int64
-				int64
-				var_name
+				ArgType:
+					PUB_I64
+					PUB_I64
 
-				num1
-				num2
-				sum
+				Code{
+					OpCode:       OpWrap{OP_DIV,TokPos{..}},
+					ArgType:      []ArgTypeWrap{..}, // 类型都为 PUB_I64
+					IsArgSurface: []IsSurfaceWrap{..}, // 第三个一定为非字面值，编译期保证
+					ArgContent:   []ArgContWrap{..}, // 第三个一定为变量
+				}
 			*/
 
-			aNum, bNum, err := vm.arithmeticPrepare(ins, "div")
-			if err != nil {
-				sourcePosA := vm.OriginPos[vm.PC][4]
-				sourcePosB := vm.OriginPos[vm.PC][5]
-				return &ErrArithmetic{
-					Operation: "div",
-					Err:       err,
-				}, []TokenPos{sourcePosA, sourcePosB}
+			var aNum, bNum, res int64
+			var err error
+			var errPos []TokPos
+			var ok bool
+
+			// 先提取 a
+			aNum, err, errPos, ok = vm.extractArithmeticToken(ins, 0)
+			if !ok {
+				return err, errPos
 			}
 
-			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], aNum/bNum)
+			// 再提取 b
+			bNum, err, errPos, ok = vm.extractArithmeticToken(ins, 1)
 			if !ok {
-				sourcePosDiv := vm.OriginPos[vm.PC][6]
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosDiv}
+				return err, errPos
+			}
+
+			res = aNum / bNum
+
+			resVarName := ins.ArgContent[2].ArgContent
+
+			ok = vm.updateVarBySurfaceInt64Pub(resVarName, res)
+			if !ok {
+				return &ErrVarNotFound{Name: resVarName}, []TokPos{ins.ArgContent[2].TokenPos}
 			}
 
 			vm.PC++
@@ -717,37 +820,48 @@ func (vm *VM) Run() (error, []TokPos) {
 			/*
 				OP_EQ_INT
 
-				int64
-				int64
-				var_name (int64(bool))
+				ArgType:
+					PUB_I64
+					PUB_I64
 
-				num1
-				num2
-				sum
+				Code{
+					OpCode:       OpWrap{OP_EQ_INT,TokPos{..}},
+					ArgType:      []ArgTypeWrap{..}, // 类型都为 PUB_I64
+					IsArgSurface: []IsSurfaceWrap{..}, // 第三个一定为非字面值，编译期保证
+					ArgContent:   []ArgContWrap{..}, // 第三个一定为变量
+				}
 			*/
 
-			aNum, bNum, err := vm.arithmeticPrepare(ins, "eq_int")
-			if err != nil {
-				sourcePosA := vm.OriginPos[vm.PC][4]
-				sourcePosB := vm.OriginPos[vm.PC][5]
-				return &ErrArithmetic{
-					Operation: "eq_int",
-					Err:       err,
-				}, []TokenPos{sourcePosA, sourcePosB}
-			}
+			var aNum, bNum, res int64
+			var err error
+			var errPos []TokPos
+			var ok bool
 
-			var boolean int64
-
-			if aNum == bNum {
-				boolean = 1
-			} else {
-				boolean = 0
-			}
-
-			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], boolean)
+			// 先提取 a
+			aNum, err, errPos, ok = vm.extractArithmeticToken(ins, 0)
 			if !ok {
-				sourcePosSum := vm.OriginPos[vm.PC][6]
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSum}
+				return err, errPos
+			}
+
+			// 再提取 b
+			bNum, err, errPos, ok = vm.extractArithmeticToken(ins, 1)
+			if !ok {
+				return err, errPos
+			}
+
+			resBool := aNum == bNum
+			switch resBool {
+			case true:
+				res = 1
+			case false:
+				res = 0
+			}
+
+			resVarName := ins.ArgContent[2].ArgContent
+
+			ok = vm.updateVarBySurfaceInt64Pub(resVarName, res)
+			if !ok {
+				return &ErrVarNotFound{Name: resVarName}, []TokPos{ins.ArgContent[2].TokenPos}
 			}
 
 			vm.PC++
@@ -755,39 +869,51 @@ func (vm *VM) Run() (error, []TokPos) {
 
 		case OP_EQ_BYTES:
 			/*
-				OP_CMP_BYTES
+				OP_EQ_BYTES
 
-				[]byte
-				[]byte
-				var_name (int64(bool))
+				ArgType:
+					PUB_I64
+					PUB_I64
 
-				bytes1
-				bytes2
-				sum
+				Code{
+					OpCode:       OpWrap{OP_EQ_BYTES,TokPos{..}},
+					ArgType:      []ArgTypeWrap{..}, // 前两个类型为 PUB_BYTES, 第三个是 PUB_I64
+					IsArgSurface: []IsSurfaceWrap{..}, // 第三个一定为非字面值，编译期保证
+					ArgContent:   []ArgContWrap{..}, // 第三个一定为变量
+				}
 			*/
 
-			aBytes, bBytes, err := vm.extractBytesForEq(ins)
-			if err != nil {
-				sourcePosA := vm.OriginPos[vm.PC][4]
-				sourcePosB := vm.OriginPos[vm.PC][5]
-				return &ErrArithmetic{
-					Operation: "eq_bytes",
-					Err:       err,
-				}, []TokenPos{sourcePosA, sourcePosB}
-			}
+			var aBytes, bBytes []byte
+			var res int64
+			var err error
+			var errPos []TokPos
+			var ok bool
 
-			var boolean int64
-
-			if bytes.Equal(aBytes, bBytes) {
-				boolean = 1
-			} else {
-				boolean = 0
-			}
-
-			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], boolean)
+			// 先提取 a
+			aBytes, err, errPos, ok = vm.extractArithmeticTokenBytes(ins, 0)
 			if !ok {
-				sourcePosSum := vm.OriginPos[vm.PC][6]
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSum}
+				return err, errPos
+			}
+
+			// 再提取 b
+			bBytes, err, errPos, ok = vm.extractArithmeticTokenBytes(ins, 1)
+			if !ok {
+				return err, errPos
+			}
+
+			resBool := bytes.Equal(aBytes, bBytes)
+			switch resBool {
+			case true:
+				res = 1
+			case false:
+				res = 0
+			}
+
+			resVarName := ins.ArgContent[2].ArgContent
+
+			ok = vm.updateVarBySurfaceInt64Pub(resVarName, res)
+			if !ok {
+				return &ErrVarNotFound{Name: resVarName}, []TokPos{ins.ArgContent[2].TokenPos}
 			}
 
 			vm.PC++
@@ -797,36 +923,48 @@ func (vm *VM) Run() (error, []TokPos) {
 			/*
 				OP_LARGE_INT
 
-				int64
-				int64
-				var_name (int64(bool))
+				ArgType:
+					PUB_I64
+					PUB_I64
 
-				num1
-				num2
-				res
+				Code{
+					OpCode:       OpWrap{OP_LARGE_INT,TokPos{..}},
+					ArgType:      []ArgTypeWrap{..}, // 类型都为 PUB_I64
+					IsArgSurface: []IsSurfaceWrap{..}, // 第三个一定为非字面值，编译期保证
+					ArgContent:   []ArgContWrap{..}, // 第三个一定为变量
+				}
 			*/
 
-			aNum, bNum, err := vm.arithmeticPrepare(ins, "large_int")
-			if err != nil {
-				sourcePosA := vm.OriginPos[vm.PC][4]
-				sourcePosB := vm.OriginPos[vm.PC][5]
-				return &ErrArithmetic{
-					Operation: "large_int",
-					Err:       err,
-				}, []TokenPos{sourcePosA, sourcePosB}
-			}
+			var aNum, bNum, res int64
+			var err error
+			var errPos []TokPos
+			var ok bool
 
-			var boolean int64
-			if aNum > bNum {
-				boolean = 1
-			} else {
-				boolean = 0
-			}
-
-			ok := vm.updateVarBySurfaceInt64Pub(ins.ArgIdentifier[2], boolean)
+			// 先提取 a
+			aNum, err, errPos, ok = vm.extractArithmeticToken(ins, 0)
 			if !ok {
-				sourcePosSum := vm.OriginPos[vm.PC][6]
-				return &ErrVarNotFound{Name: ins.ArgIdentifier[2]}, []TokenPos{sourcePosSum}
+				return err, errPos
+			}
+
+			// 再提取 b
+			bNum, err, errPos, ok = vm.extractArithmeticToken(ins, 1)
+			if !ok {
+				return err, errPos
+			}
+
+			resBool := aNum == bNum
+			switch resBool {
+			case true:
+				res = 1
+			case false:
+				res = 0
+			}
+
+			resVarName := ins.ArgContent[2].ArgContent
+
+			ok = vm.updateVarBySurfaceInt64Pub(resVarName, res)
+			if !ok {
+				return &ErrVarNotFound{Name: resVarName}, []TokPos{ins.ArgContent[2].TokenPos}
 			}
 
 			vm.PC++
@@ -836,26 +974,45 @@ func (vm *VM) Run() (error, []TokPos) {
 			/*
 				OP_JMP
 
-				label (surface int64)
+				ArgType
+					PUB_I64
 
-				000...
+				ArgContent
+					LabelSign
+
+				Code{
+						OpCode:       OpWrap{OP_JMP,TokPos{..}},
+						ArgType:      []ArgTypeWrap{..}, // 一个 PUB_I64
+						IsArgSurface: []IsSurfaceWrap{..}, // 字面值，编译期保证
+						ArgContent:   []ArgContWrap{..},
+				}
 			*/
-			labelStr := ins.ArgIdentifier[0]
-			label, err := strconv.ParseInt(labelStr, 10, 64)
-			if err != nil {
-				sourcePosJmp := vm.OriginPos[vm.PC][2]
-				return &ErrBlockLabelInvalid{Label: labelStr, Reason: "not a valid integer"}, []TokenPos{sourcePosJmp}
-			}
 
-			tgtBlock, ok := vm.Blocks[label]
+			labelSign := ins.ArgContent[0].ArgContentInt64IfSurface
+
+			tgtBlock, ok := vm.Blocks[labelSign]
 			if !ok {
-				sourcePosJmp := vm.OriginPos[vm.PC][2]
-				return &ErrLabelNotFound{Label: labelStr}, []TokenPos{sourcePosJmp}
+				return &ErrLabelNotFound{Label: labelSign}, []TokPos{ins.ArgContent[0].TokenPos}
 			}
-			eptBlock := Block{}
-			if tgtBlock == eptBlock {
-				sourcePosJmp := vm.OriginPos[vm.PC][2]
-				return &ErrLabelEmpty{Label: labelStr}, []TokenPos{sourcePosJmp}
+			if &tgtBlock.BeginPC == nil {
+				return &ErrBlockLabelInvalid{
+					Label:  labelSign,
+					Reason: "begin pc ptr is nil",
+				}, []TokPos{ins.ArgContent[0].TokenPos}
+			}
+			if &tgtBlock.EndPC == nil {
+				return &ErrBlockNotClosed{
+						Label: labelSign,
+					}, []TokPos{
+						ins.ArgContent[0].TokenPos,
+					}
+			}
+			if tgtBlock.EndPC < tgtBlock.BeginPC {
+				// （若编译期无误，这里永远不会到达）
+				return &ErrBlockLabelInvalid{
+					Label:  labelSign,
+					Reason: "end pc even comes before begin pc, this should be found in compiling",
+				}, []TokPos{ins.ArgContent[0].TokenPos}
 			}
 
 			vm.PC = tgtBlock.BeginPC
@@ -865,70 +1022,131 @@ func (vm *VM) Run() (error, []TokPos) {
 			/*
 				OP_IF
 
-				bool (int64)
-				label (int64)
+				ArgType
+					PUB_I64
+					PUB_I64
 
-				condition
-				label
+				ArgContent
+					ConditionBool
+					LabelSign
+
+				Code{
+					OpCode:       OpWrap{OP_IF,TokPos{..}},
+					ArgType:      []ArgTypeWrap{..}, // 两个 PUB_I64
+					IsArgSurface: []IsSurfaceWrap{..}, //第一个不做要求，第二个字面值，编译期保证
+					ArgContent:   []ArgContWrap{..},
+				}
 			*/
 
-			conditionStr := ins.ArgIdentifier[0]
-			condition, err := strconv.ParseInt(conditionStr, 10, 64)
-			if err != nil {
-				sourcePosIf := vm.OriginPos[vm.PC][3]
-				return &ErrOperandType{Operation: "if", Detail: fmt.Sprintf("condition '%s' not a valid int64: %v", conditionStr, err)}, []TokenPos{sourcePosIf}
+			var condition bool
+			rawConditionType := ins.ArgType[0].Type
+			switch rawConditionType {
+			case PUB_I64:
+				switch ins.IsArgSurface[0].IsSurface {
+				case true:
+					conditionInt64 := ins.ArgContent[0].ArgContentInt64IfSurface
+					switch conditionInt64 {
+					case 0:
+						condition = false
+					case 1:
+						condition = true
+					default:
+						return &ErrIfConditionIsNotBoolInt64{Get: conditionInt64}, []TokPos{ins.ArgContent[0].TokenPos}
+					}
+				case false:
+					conditionVarName := ins.ArgContent[0].ArgContent
+					conditionInt64, ok := vm.getInt64VarPub(conditionVarName)
+					if !ok {
+						return &ErrVarNotFound{Name: conditionVarName}, []TokPos{ins.ArgContent[0].TokenPos}
+					}
+					switch conditionInt64 {
+					case 0:
+						condition = false
+					case 1:
+						condition = true
+					default:
+						return &ErrIfConditionIsNotBoolInt64{Get: conditionInt64}, []TokPos{ins.ArgContent[0].TokenPos}
+					}
+				}
+			case PUB_BYTES:
+				return &ErrTypeMismatch{Expected: "PUB_I64", Got: "PUB_BYTES"}, []TokPos{ins.ArgType[0].TokenPos}
+			case PRIV_I64:
+				return &ErrTypeMismatch{Expected: "PUB_I64", Got: "PRIV_I64"}, []TokPos{ins.ArgType[0].TokenPos}
+			case PRIV_BYTES:
+				return &ErrTypeMismatch{Expected: "PUB_I64", Got: "PRIV_BYTES"}, []TokPos{ins.ArgType[0].TokenPos}
+			case ISO_I64:
+				return &ErrTypeMismatch{Expected: "PUB_I64", Got: "ISO_I64"}, []TokPos{ins.ArgType[0].TokenPos}
+			case ISO_BYTES:
+				return &ErrTypeMismatch{Expected: "PUB_I64", Got: "ISO_BYTES"}, []TokPos{ins.ArgType[0].TokenPos}
+			default:
+				return &ErrUnsupportedMemType{MemType: PtrKind(rawConditionType)}, []TokPos{ins.ArgType[0].TokenPos}
 			}
 
 			switch condition {
-			case 0:
+			case false:
 				// false, 跳过 label
 				vm.PC++
 				vm.Lines++
-			case 1:
-				// true, jmp to label block
-				labelStr := ins.ArgIdentifier[1]
-				label, err := strconv.ParseInt(labelStr, 10, 64)
-				if err != nil {
-					sourcePosIf := vm.OriginPos[vm.PC][4]
-					return &ErrBlockLabelInvalid{Label: labelStr, Reason: "not a valid integer"}, []TokenPos{sourcePosIf}
-				}
-				tgtBlock, ok := vm.Blocks[label]
+			case true:
+				labelSign := ins.ArgContent[1].ArgContentInt64IfSurface
+
+				tgtBlock, ok := vm.Blocks[labelSign]
 				if !ok {
-					sourcePosIf := vm.OriginPos[vm.PC][4]
-					return &ErrLabelNotFound{Label: labelStr}, []TokenPos{sourcePosIf}
+					return &ErrLabelNotFound{Label: labelSign}, []TokPos{ins.ArgContent[0].TokenPos}
 				}
-				eptBlock := Block{}
-				if tgtBlock == eptBlock {
-					sourcePosIf := vm.OriginPos[vm.PC][4]
-					return &ErrLabelEmpty{Label: labelStr}, []TokenPos{sourcePosIf}
+				if &tgtBlock.BeginPC == nil {
+					return &ErrBlockLabelInvalid{
+						Label:  labelSign,
+						Reason: "begin pc ptr is nil",
+					}, []TokPos{ins.ArgContent[0].TokenPos}
+				}
+				if &tgtBlock.EndPC == nil {
+					return &ErrBlockNotClosed{
+							Label: labelSign,
+						}, []TokPos{
+							ins.ArgContent[0].TokenPos,
+						}
+				}
+				if tgtBlock.EndPC < tgtBlock.BeginPC {
+					// （若编译期无误，这里永远不会到达）
+					return &ErrBlockLabelInvalid{
+						Label:  labelSign,
+						Reason: "end pc even comes before begin pc, this should be found in compiling",
+					}, []TokPos{ins.ArgContent[0].TokenPos}
 				}
 
 				vm.PC = tgtBlock.BeginPC
 				vm.Lines++
-			default:
-				sourcePosIf := vm.OriginPos[vm.PC][3]
-				return &ErrOperandType{Operation: "if", Detail: fmt.Sprintf("condition '%s' is illegal: must be 0 or 1", conditionStr)}, []TokenPos{sourcePosIf}
 			}
 
 		case OP_BEGIN:
 			/*
 				OP_BEGIN
 
-				label (surface int64)
+				ArgType
+					PUB_I64
 
-				000...
+				ArgContent
+					LabelSign
+
+				Code{
+					OpCode:       OpWrap{OP_BEGIN,TokPos{..}},
+					ArgType:      []ArgTypeWrap{..}, // 一个 PUB_I64
+					IsArgSurface: []IsSurfaceWrap{..}, // 第一个字面值，编译期保证
+					ArgContent:   []ArgContWrap{..},
+				}
 			*/
 
 			beginPC := vm.PC - 1
 			var endPC int64
-			label := ins.ArgIdentifier[0]
+			labelSign := ins.ArgContent[0].ArgContentInt64IfSurface
 			isEndExists := false
 
-			for nowPC, nowIns := range vm.Code[beginPC:] {
-				switch nowIns.Op {
+			for nowPC, nowIns := range vm.Codes[beginPC:] {
+				switch nowIns.OpCode.Code {
 				case OP_END:
 					// 遇到 end, 检查 label
-					if nowIns.ArgIdentifier[0] != label {
+					if nowIns.ArgContent[0].ArgContentInt64IfSurface != labelSign {
 						// 不是当前 label 的 end
 						continue
 					}
@@ -944,8 +1162,7 @@ func (vm *VM) Run() (error, []TokPos) {
 
 			if !isEndExists {
 				// do not found end
-				sourcePosBegin := vm.OriginPos[vm.PC][0]
-				return &ErrBlockNotClosed{Label: label}, []TokenPos{sourcePosBegin}
+				return &ErrBlockNotClosed{Label: labelSign}, []TokPos{ins.ArgContent[0].TokenPos}
 			}
 
 			// 存在，记录
@@ -954,13 +1171,7 @@ func (vm *VM) Run() (error, []TokPos) {
 				EndPC:   endPC,
 			}
 
-			labelNum, err := strconv.ParseInt(label, 10, 64)
-			if err != nil {
-				sourcePosBegin := vm.OriginPos[vm.PC][2]
-				return &ErrBlockLabelInvalid{Label: label, Reason: "not a number"}, []TokenPos{sourcePosBegin}
-			}
-
-			vm.Blocks[labelNum] = block
+			vm.Blocks[labelSign] = block
 
 			vm.PC = endPC + 2 // 跳过 block body 和 end，到达 end 后一条指令
 			vm.Lines++
@@ -968,8 +1179,7 @@ func (vm *VM) Run() (error, []TokPos) {
 		case OP_END:
 			// 理论上不可能到达这个位置
 			// 因为已经在 OP_BEGIN 处理
-			sourcePosEnd := vm.OriginPos[vm.PC][0]
-			return &ErrUnexpectedEnd{Label: ins.ArgIdentifier[0]}, []TokenPos{sourcePosEnd}
+			return &ErrUnexpectedEnd{Label: ins.ArgContent[0].ArgContentInt64IfSurface}, []TokPos{ins.ArgContent[0].TokenPos}
 
 		case OP_CALL_RS:
 			/*
@@ -1268,8 +1478,7 @@ func (vm *VM) Run() (error, []TokPos) {
 			vm.Lines++
 
 		default:
-			sourcePosCall := vm.OriginPos[vm.PC][0]
-			return &ErrUnknownOpcode{Opcode: int(ins.Op)}, []TokenPos{sourcePosCall}
+			return &ErrUnknownOpcode{Opcode: int(ins.OpCode.Code)}, []TokPos{ins.OpCode.TokenPos}
 		}
 
 		if vm.TraceMode {
@@ -1280,7 +1489,109 @@ func (vm *VM) Run() (error, []TokPos) {
 			vm.Traces[vm.Lines] = traceStep
 		}
 	}
-	return nil, []TokenPos{}
+	return nil, []TokPos{}
+}
+
+func (vm *VM) extractArithmeticToken(ins Code, position int64) (int64, error, []TokPos, bool) {
+	thisType := ins.ArgType[position].Type
+	var thisNum int64
+	switch thisType {
+	case PUB_I64:
+		switch ins.IsArgSurface[position].IsSurface {
+		case true:
+			// 字面 PUB_I64
+			thisNum = ins.ArgContent[position].ArgContentInt64IfSurface
+		case false:
+			// 变量 PUB_I64
+			varName := ins.ArgContent[position].ArgContent
+			var ok bool
+			thisNum, ok = vm.getInt64VarPub(varName)
+			if !ok {
+				return 0, &ErrVarNotFound{Name: varName}, []TokPos{ins.ArgContent[position].TokenPos}, false
+			}
+		}
+	case PUB_BYTES:
+		// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+		return 0, &ErrTypeMismatch{Expected: "PUB_I64", Got: "PUB_BYTES"}, []TokPos{ins.ArgContent[position].TokenPos}, false
+	case PRIV_I64:
+		// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+		return 0, &ErrTypeMismatch{
+			Expected: "PUB_I64",
+			Got:      "PRIV_I64",
+		}, []TokPos{ins.ArgContent[position].TokenPos}, false
+	case PRIV_BYTES:
+		// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+		return 0, &ErrTypeMismatch{
+			Expected: "PUB_I64",
+			Got:      "PRIV_BYTES",
+		}, []TokPos{ins.ArgContent[position].TokenPos}, false
+	case ISO_I64:
+		// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+		return 0, &ErrTypeMismatch{
+			Expected: "PUB_I64",
+			Got:      "ISO_I64",
+		}, []TokPos{ins.ArgContent[position].TokenPos}, false
+	case ISO_BYTES:
+		// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+		return 0, &ErrTypeMismatch{
+			Expected: "PUB_I64",
+			Got:      "ISO_BYTES",
+		}, []TokPos{ins.ArgContent[position].TokenPos}, false
+	default:
+		return 0, &ErrUnsupportedMemType{MemType: PtrKind(thisType)}, []TokPos{ins.ArgContent[position].TokenPos}, true
+	}
+	return thisNum, nil, nil, true
+}
+
+func (vm *VM) extractArithmeticTokenBytes(ins Code, position int64) ([]byte, error, []TokPos, bool) {
+	thisType := ins.ArgType[position].Type
+	var thisBytes []byte
+	switch thisType {
+	case PUB_I64:
+		// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+		return nil, &ErrTypeMismatch{Expected: "PUB_BYTES", Got: "PUB_I64"}, []TokPos{ins.ArgContent[position].TokenPos}, false
+	case PUB_BYTES:
+		switch ins.IsArgSurface[position].IsSurface {
+		case true:
+			// 字面 PUB_BYTES
+			thisBytes = ins.ArgContent[position].ArgContentBytesIfSurface
+		case false:
+			// 变量 PUB_I64
+			varName := ins.ArgContent[position].ArgContent
+			var ok bool
+			thisBytes, ok = vm.getBytesVarPub(varName)
+			if !ok {
+				return nil, &ErrVarNotFound{Name: varName}, []TokPos{ins.ArgContent[position].TokenPos}, false
+			}
+		}
+	case PRIV_I64:
+		// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+		return nil, &ErrTypeMismatch{
+			Expected: "PUB_BYTES",
+			Got:      "PRIV_I64",
+		}, []TokPos{ins.ArgContent[position].TokenPos}, false
+	case PRIV_BYTES:
+		// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+		return nil, &ErrTypeMismatch{
+			Expected: "PUB_BYTES",
+			Got:      "PRIV_BYTES",
+		}, []TokPos{ins.ArgContent[position].TokenPos}, false
+	case ISO_I64:
+		// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+		return nil, &ErrTypeMismatch{
+			Expected: "PUB_BYTES",
+			Got:      "ISO_I64",
+		}, []TokPos{ins.ArgContent[position].TokenPos}, false
+	case ISO_BYTES:
+		// （若编译期无误，这里永远不会到达，写这里违背了编译期严格确定类型和内存问题的原则，但起到消除警告的作用）
+		return nil, &ErrTypeMismatch{
+			Expected: "PUB_BYTES",
+			Got:      "ISO_BYTES",
+		}, []TokPos{ins.ArgContent[position].TokenPos}, false
+	default:
+		return nil, &ErrUnsupportedMemType{MemType: PtrKind(thisType)}, []TokPos{ins.ArgContent[position].TokenPos}, true
+	}
+	return thisBytes, nil, nil, true
 }
 
 // allocVar 声明一个变量并分配栈空间，返回指针; size only be needed for heap
@@ -1447,102 +1758,6 @@ func (vm *VM) dropVar(name string) error {
 	vm.Mem.free(ptr)
 	delete(vm.Vars, name)
 	return nil
-}
-
-func (vm *VM) arithmeticPrepare(ins Instruction, opName string) (int64, int64, error) {
-	// 使用 getInt64Arg 提取前两个操作数（只接受变量，拒绝字面量）
-	// todo: 计划接受字面量，但目前不支持
-	aNum, err := vm.getInt64Arg(ins.ArgIdentifier[0])
-	if err != nil {
-		return 0, 0, &ErrArithmetic{Operation: opName, Err: err}
-	}
-	bNum, err := vm.getInt64Arg(ins.ArgIdentifier[1])
-	if err != nil {
-		return 0, 0, &ErrArithmetic{Operation: opName, Err: err}
-	}
-
-	// 第三个参数必须为 int64 变量，拒绝所有字面量
-	if len(ins.ArgIdentifier[2]) >= 2 && ins.ArgIdentifier[2][0] == '\'' && ins.ArgIdentifier[2][len(ins.ArgIdentifier[2])-1] == '\'' {
-		return 0, 0, &ErrArithmetic{Operation: opName, Err: &ErrOperandType{Operation: opName, Detail: fmt.Sprintf("sum var '%s' is []byte", ins.ArgIdentifier[2])}}
-	}
-	if _, err := strconv.ParseInt(ins.ArgIdentifier[2], 10, 64); err == nil {
-		return 0, 0, &ErrArithmetic{Operation: opName, Err: &ErrOperandType{Operation: opName, Detail: fmt.Sprintf("sum var '%s' is int64", ins.ArgIdentifier[2])}}
-	}
-	// 必须是已存在的 int64 变量
-	_, ok := vm.getInt64VarPub(ins.ArgIdentifier[2])
-	if !ok {
-		return 0, 0, &ErrArithmetic{Operation: opName, Err: &ErrVarNotFound{Name: ins.ArgIdentifier[2]}}
-	}
-	return aNum, bNum, nil
-}
-
-func (vm *VM) extractBytesForEq(ins Instruction) ([]byte, []byte, error) {
-	// 使用 getBytesArg 提取前两个操作数
-	aBytes, err := vm.getBytesArg(ins.ArgIdentifier[0])
-	if err != nil {
-		return nil, nil, &ErrArithmetic{Operation: "eq_bytes", Err: err}
-	}
-	bBytes, err := vm.getBytesArg(ins.ArgIdentifier[1])
-	if err != nil {
-		return nil, nil, &ErrArithmetic{Operation: "eq_bytes", Err: err}
-	}
-
-	// 第三个参数必须为 int64 变量，拒绝所有字面量
-	if len(ins.ArgIdentifier[2]) >= 2 && ins.ArgIdentifier[2][0] == '\'' && ins.ArgIdentifier[2][len(ins.ArgIdentifier[2])-1] == '\'' {
-		return nil, nil, &ErrArithmetic{Operation: "eq_bytes", Err: &ErrOperandType{Operation: "eq_bytes", Detail: fmt.Sprintf("sum var '%s' is []byte", ins.ArgIdentifier[2])}}
-	}
-	if _, err := strconv.ParseInt(ins.ArgIdentifier[2], 10, 64); err == nil {
-		return nil, nil, &ErrArithmetic{Operation: "eq_bytes", Err: &ErrOperandType{Operation: "eq_bytes", Detail: fmt.Sprintf("sum var '%s' is int64", ins.ArgIdentifier[2])}}
-	}
-	// 必须是已存在的 int64 变量
-	_, ok := vm.getInt64VarPub(ins.ArgIdentifier[2])
-	if !ok {
-		return nil, nil, &ErrArithmetic{Operation: "eq_bytes", Err: &ErrVarNotFound{Name: ins.ArgIdentifier[2]}}
-	}
-	return aBytes, bBytes, nil
-}
-
-// isSurfaceBytes 判断 identifier 是否为 []byte 字面量（以单引号包围）。
-func isSurfaceBytes(identifier string) bool {
-	return len(identifier) >= 2 && identifier[0] == '\'' && identifier[len(identifier)-1] == '\''
-}
-
-// isSurfaceInt64 判断 identifier 是否为 int64 字面量（十进制）。
-func isSurfaceInt64(identifier string) bool {
-	_, err := strconv.ParseInt(identifier, 10, 64)
-	return err == nil
-}
-
-// getInt64Arg 尝试从 identifier 中提取 int64 值。
-// 若 identifier 为 []byte 字面量（'...'），则返回错误；
-// 否则尝试解析为十进制 int64，若失败则从变量中读取。
-func (vm *VM) getInt64Arg(identifier string) (int64, error) {
-	if isSurfaceBytes(identifier) {
-		return 0, &ErrOperandType{Operation: "getInt64Arg", Detail: fmt.Sprintf("var '%s' is []byte", identifier)}
-	}
-	if num, err := strconv.ParseInt(identifier, 10, 64); err == nil {
-		return num, nil
-	}
-	num, ok := vm.getInt64VarPub(identifier)
-	if !ok {
-		return 0, &ErrVarNotFound{Name: identifier}
-	}
-	return num, nil
-}
-
-// getBytesArg 尝试从 identifier 中提取 []byte 值。
-func (vm *VM) getBytesArg(identifier string) ([]byte, error) {
-	if isSurfaceBytes(identifier) {
-		return []byte(identifier), nil
-	}
-	if isSurfaceInt64(identifier) {
-		return nil, &ErrOperandType{Operation: "getBytesArg", Detail: fmt.Sprintf("var '%s' is int64", identifier)}
-	}
-	b, ok := vm.getBytesVarPub(identifier)
-	if !ok {
-		return nil, &ErrVarNotFound{Name: identifier}
-	}
-	return b, nil
 }
 
 func (vm *VM) getVarsDiff() []VarsDiff {

@@ -38,26 +38,19 @@ func (e *ErrUnsupportedMemType) Error() string {
 	return fmt.Sprintf("unsupported mem type: %v", e.MemType)
 }
 
-// ErrUnsupportedPtrKind indicates an unsupported pointer kind.
-type ErrUnsupportedPtrKind struct{ Kind interface{} }
-
-func (e *ErrUnsupportedPtrKind) Error() string {
-	return fmt.Sprintf("unsupported ptr kind: %v", e.Kind)
+// ErrUpdatePrivVarBySurface indicates a privacy memory update is unsupported in a non-call instruction.
+type ErrUpdatePrivVarBySurface struct {
+	VarName string
 }
 
-// ErrPrivacyMemUpdateInNoCallIns indicates a privacy memory update is unsupported in a non-call instruction.
-type ErrPrivacyMemUpdateInNoCallIns struct {
-	ThisIns string
-}
-
-func (e *ErrPrivacyMemUpdateInNoCallIns) Error() string {
-	return fmt.Sprintf("privacy mem update is unsupported in: %s, but call instruction", e.ThisIns)
+func (e *ErrUpdatePrivVarBySurface) Error() string {
+	return fmt.Sprintf("privacy mem update is unsupported in: %s", e.VarName)
 }
 
 // ============== Block/Label Errors ==============
 
 // ErrLabelNotFound indicates a label was not found in the Blocks map.
-type ErrLabelNotFound struct{ Label string }
+type ErrLabelNotFound struct{ Label int64 }
 
 func (e *ErrLabelNotFound) Error() string { return fmt.Sprintf("label '%s' not found", e.Label) }
 
@@ -69,7 +62,7 @@ func (e *ErrLabelEmpty) Error() string {
 }
 
 // ErrBlockNotClosed indicates a BEGIN instruction never found its matching END.
-type ErrBlockNotClosed struct{ Label string }
+type ErrBlockNotClosed struct{ Label int64 }
 
 func (e *ErrBlockNotClosed) Error() string {
 	return fmt.Sprintf("block with label '%s' not closed", e.Label)
@@ -77,7 +70,7 @@ func (e *ErrBlockNotClosed) Error() string {
 
 // ErrBlockLabelInvalid indicates a block label is not a valid integer.
 type ErrBlockLabelInvalid struct {
-	Label  string
+	Label  int64
 	Reason string
 }
 
@@ -86,6 +79,15 @@ func (e *ErrBlockLabelInvalid) Error() string {
 }
 
 // ============== Instruction Errors ==============
+
+// ErrIfConditionIsNotBoolInt64 indicates that receive a value as bool, but it is not 0 or 1
+type ErrIfConditionIsNotBoolInt64 struct {
+	Get int64
+}
+
+func (e *ErrIfConditionIsNotBoolInt64) Error() string {
+	return fmt.Sprintf("The if condition isn't a 0 or 1: %d", e.Get)
+}
 
 // ErrTypeContentLenMismatch indicates that len(ins.ArgType) != len(ins.ArgCont)
 type ErrTypeContentLenMismatch struct {
@@ -115,7 +117,7 @@ func (e *ErrUnknownOpcode) Error() string {
 }
 
 // ErrUnexpectedEnd indicates an END instruction that should have been handled.
-type ErrUnexpectedEnd struct{ Label string }
+type ErrUnexpectedEnd struct{ Label int64 }
 
 func (e *ErrUnexpectedEnd) Error() string {
 	return fmt.Sprintf("unexpected end: with label '%s'", e.Label)
