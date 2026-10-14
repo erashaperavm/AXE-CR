@@ -1002,10 +1002,10 @@ func (vm *VM) Run() (error, []TokPos) {
 			}
 			if &tgtBlock.EndPC == nil {
 				return &ErrBlockNotClosed{
-						Label: labelSign,
-					}, []TokPos{
-						ins.ArgContent[0].TokenPos,
-					}
+					Label: labelSign,
+				}, []TokPos{
+					ins.ArgContent[0].TokenPos,
+				}
 			}
 			if tgtBlock.EndPC < tgtBlock.BeginPC {
 				// （若编译期无误，这里永远不会到达）
@@ -1102,10 +1102,10 @@ func (vm *VM) Run() (error, []TokPos) {
 				}
 				if &tgtBlock.EndPC == nil {
 					return &ErrBlockNotClosed{
-							Label: labelSign,
-						}, []TokPos{
-							ins.ArgContent[0].TokenPos,
-						}
+						Label: labelSign,
+					}, []TokPos{
+						ins.ArgContent[0].TokenPos,
+					}
 				}
 				if tgtBlock.EndPC < tgtBlock.BeginPC {
 					// （若编译期无误，这里永远不会到达）
@@ -1185,115 +1185,70 @@ func (vm *VM) Run() (error, []TokPos) {
 			/*
 				OP_CALL_RS
 
-				func_name
-				int64
-				int64
-				int64 / bytes
-				... n 个
+				ArgType (example)
+					func_name
+					int64
+					int64 / bytes
+					... n 个
 
-				// 必须前面全部是 int64 后面全是 bytes
+				ArgContent (example)
+					funname
+					inNum
+					outNum
+					i0
+					i1
+					o0
 
-				funname
-				inNum
-				outNum
-				i0
-				i1
-				o0
+				Code{
+					OpCode:       OpWrap{OP_CALL_RS,TokPos{..}},
+					ArgType:      []ArgTypeWrap{..}, // 一个 PUB_BYTES, 后面不限，由编译期保证
+					IsArgSurface: []IsSurfaceWrap{..}, // 第一个是字面值，后面的不限，由编译期保证
+					ArgContent:   []ArgContWrap{..},
+				}
 			*/
 
 			// 此处个数不定，为了简化，出错位置统一定位在 call... 关键字
-			sourcePosCall := vm.OriginPos[vm.PC][0]
+			sourcePosCall := ins.OpCode.TokenPos
 
 			// 匹配 "__internal_数字" 在字符串末尾, 这是编译器用于判定统一函数调用次数
 			re := regexp.MustCompile(`__internal_(\d+)$`)
-			matches := re.FindStringSubmatch(ins.ArgIdentifier[0])
+			matches := re.FindStringSubmatch(string(ins.ArgContent[0].ArgContentBytesIfSurface))
 
 			if len(matches) < 2 {
 				// 没有匹配到，返回原字符串和错误
-				return &ErrFuncNameInvalid{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePosCall}
+				return &ErrFuncNameInvalid{Name: string(ins.ArgContent[0].ArgContentBytesIfSurface)}, []TokPos{sourcePosCall}
 			}
 
 			// 提取数字
 			funCallIdx, err := strconv.Atoi(matches[1])
 			if err != nil {
-				return &ErrFuncNameInvalid{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePosCall}
+				return &ErrFuncNameInvalid{Name: string(ins.ArgContent[0].ArgContentBytesIfSurface)}, []TokPos{sourcePosCall}
 			}
 
 			// 删除后缀，返回剩余部分
-			funName := re.ReplaceAllString(ins.ArgIdentifier[0], "")
+			funName := re.ReplaceAllString(string(ins.ArgContent[0].ArgContentBytesIfSurface), "")
 
 			// 获取函数运行要求
-			req := vm.Env.Funcs[ins.ArgIdentifier[0]]
+			req := vm.Env.Funcs[string(ins.ArgContent[0].ArgContentBytesIfSurface)]
 			if req == nil {
-				return &ErrFuncNotFound{Name: ins.ArgIdentifier[0]}, []TokenPos{sourcePosCall}
-			}
-
-			// 检查参数是否符合前 int64 后 bytes
-			nowBytes := false
-			var splitPoint int
-			for i, a := range ins.ArgIdentifier {
-				if isSurfaceInt64(a) {
-					// refuse surface int64 as param
-					return &ErrOperandType{Operation: "call_rs", Detail: fmt.Sprintf("param %d is surface int64", i)}, []TokenPos{sourcePosCall}
-				}
-				if isSurfaceBytes(a) {
-					// refuse surface bytes as param
-					return &ErrOperandType{
-						Operation: "call_rs",
-						Detail:    fmt.Sprintf("param %d is surface bytes", i),
-					}, []TokenPos{sourcePosCall}
-				}
-
-				switch nowBytes {
-				case true:
-					// 已经有 bytes ，必须是 bytes
-					_, ok := vm.getBytesVarPriv(a)
-					if !ok {
-						return &ErrTypeMismatch{
-							Expected: "priv int64 or bytes",
-							Got:      "pub int64 or bytes",
-						}, []TokenPos{sourcePosCall}
-					}
-					continue
-				case false:
-					// now ensure it is variable
-					// get it via privmem visit method
-					// we try int64 first
-					_, ok := vm.getInt64VarPriv(a)
-					if !ok {
-						// try bytes
-						_, ok := vm.getBytesVarPriv(a)
-						if !ok {
-							return &ErrTypeMismatch{
-								Expected: "priv int64 or bytes",
-								Got:      "pub int64 or bytes",
-							}, []TokenPos{sourcePosCall}
-						}
-
-						// bytes
-						splitPoint = i
-						nowBytes = true
-					}
-					// int64
-					continue
-				}
+				return &ErrFuncNotFound{Name: string(ins.ArgContent[0].ArgContentBytesIfSurface)}, []TokPos{sourcePosCall}
 			}
 
 			// 检查参数(没有输出参数，因为它是隐私内存，不需要显式赋值)是否符合函数调用要求
 			for i, r := range req.ReqInput {
-				kind := vm.Vars[ins.ArgIdentifier[i+1]].Kind // 第一个参数是函数名
+				kind := vm.Vars[ins.ArgContent[i].ArgContent].Kind
 				if r == "bytes" {
-					// require for bytes
-					if kind != PRIV_HEAP {
+					// require for bytes (pub and priv is acceptable)
+					if kind != PUB_HEAP {
 						return &ErrTypeMismatch{
-							Expected: "priv bytes",
+							Expected: "PUB_BYTES",
 							Got:      fmt.Sprintf("%s", kind),
-						}, []TokenPos{sourcePosCall}
+						}, []TokPos{sourcePosCall}
 					}
 					continue
 				} else if r == "int64" {
-					// require for int64
-					if kind != PRIV_STACK {
+					// require for int64 (pub and priv is acceptable)
+					if kind != PUB_STACK {
 						return &ErrTypeMismatch{
 							Expected: "priv int64",
 							Got:      fmt.Sprintf("%s", kind),
