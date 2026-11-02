@@ -14,7 +14,7 @@ type Environment struct {
 	ReadBytes  func(dataPosOnChain []byte) ([]byte, error)
 	WriteInt64 func(dataPosOnChain []byte, data int64) error
 	WriteBytes func(dataPosOnChain []byte, data []byte) error
-	CallRS     func(funName string, ints []int64, bytes [][]byte) (*execute.RsSp1Result, error)
+	CallRS     func(funName string, ini map[int]int64, inb map[int][]byte) (*execute.RsSp1Result, error)
 	CallC      func(funName string, input [][]byte) ([][]byte, error)
 	CallCpp    func(funName string, input [][]byte) ([][]byte, error)
 
@@ -56,9 +56,9 @@ func NewEnvironment(
 		return bridge.WriteBytes(dataPosOnChain, data)
 	}
 
-	e.CallRS = func(funName string, ints []int64, bytes [][]byte) (*execute.RsSp1Result, error) {
+	e.CallRS = func(funName string, ini map[int]int64, inb map[int][]byte) (*execute.RsSp1Result, error) {
 		tv := funcs[funName].TargetVerify
-		res, err := bridge.CallRS(exeDir, workDir, funName, tv, ints, bytes, mode)
+		res, err := bridge.CallRS(exeDir, workDir, funName, tv, ini, inb, mode)
 		if err != nil {
 			return nil, err
 		}

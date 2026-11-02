@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 )
 
-func CallRS(exeDir, wkdir, funName, targetVerify string, ints []int64, bytes [][]byte, mode string) (*execute.RsSp1Result, error) {
+func CallRS(exeDir, wkdir, funName, targetVerify string, ini map[int]int64, inb map[int][]byte, mode string) (*execute.RsSp1Result, error) {
 	funTargetPath := filepath.Join(exeDir, "function", funName)
 
 	// build input file
-	inputFilePath, err := utils.SerializeSP1input(ints, bytes, wkdir)
+	inputFilePath, err := utils.SerializeSP1input(ini, inb, wkdir)
 	if err != nil {
 		return nil, err
 	}

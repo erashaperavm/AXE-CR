@@ -12,18 +12,39 @@ import (
 	"strings"
 )
 
-func SerializeSP1input(ints []int64, bytes [][]byte, swkdir string) (string, error) {
+func SerializeSP1input(ini map[int]int64, inb map[int][]byte, swkdir string) (string, error) {
 	// 构建参数列表
 	args := []string{"--swkdir", swkdir}
 
-	// 每个 int 单独作为参数
-	for _, n := range ints {
-		args = append(args, "--int", strconv.FormatInt(n, 10))
+	// 找出一共多少参数
+	maxIdx := 0
+	var intIdx []int
+	var byteIdx []int
+	for idx, _ := range ini {
+		if idx >= maxIdx {
+			maxIdx = idx
+		}
+		intIdx = append(intIdx, idx)
+		continue
+	}
+	for idx, _ := range inb {
+		if idx >= maxIdx {
+			maxIdx = idx
+		}
+		byteIdx = append(byteIdx, idx)
+		continue
 	}
 
-	// 每个 bytes 单独作为参数
-	for _, b := range bytes {
-		args = append(args, "--byte", hex.EncodeToString(b))
+	for i := 1; i <= maxIdx; i++ {
+		for _, e := range intIdx {
+			if i == e {
+				// 第 i 参数为 int
+				args = append(args, "--int", strconv.FormatInt(ini[i], 10))
+				continue
+			}
+			// 为 bytes
+			args = append(args, "--byte", hex.EncodeToString(inb[i]))
+		}
 	}
 
 	cmd := exec.Command("serializesp1in", args...)
